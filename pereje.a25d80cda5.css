@@ -26,6 +26,18 @@ html, body {
   user-select: none; -webkit-user-select: none; overscroll-behavior: none;
   -webkit-touch-callout: none; -webkit-text-size-adjust: 100%;
 }
+/* Everything lives in #stage: full window on phones/apps, a centred window on big screens.
+   transform + contain make it the containing block for the position: fixed layers inside. */
+#stage { position: fixed; left: 0; top: 0; width: 100%; height: 100%; overflow: hidden; contain: layout paint; transform: translateZ(0); }
+body.windowed { background: radial-gradient(ellipse at 50% 42%, #134452 0%, #0a2833 48%, #04131a 100%); }
+body.windowed #stage { border-radius: 14px; box-shadow: 0 28px 90px rgba(0, 0, 0, .6), 0 0 0 1px rgba(255, 255, 255, .09); }
+body.native .web-only { display: none; }
+#fpsMeter { position: absolute; z-index: 40; left: calc(10px + var(--safe-l)); bottom: calc(10px + var(--safe-b)); pointer-events: none;
+  font: 600 12px/1.2 ui-monospace, "Cascadia Mono", Consolas, Menlo, monospace; color: #b8f5c8; background: rgba(0, 0, 0, .5);
+  padding: 4px 8px; border-radius: 7px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+#fpsMeter.hidden { display: none; }
+#fpsMeter.warn { color: #ffd479; }
+#fpsMeter.bad { color: #ff8f7a; }
 canvas { position: fixed; inset: 0; display: block; touch-action: none; }
 #cvWater { z-index: 0; }
 #cvScene { z-index: 1; }
@@ -37,13 +49,13 @@ body.no-webgl #cvScene { background: #0f3b47; }
 #hud { position: fixed; inset: 0; z-index: 3; pointer-events: none; }
 #hudScore {
   position: absolute; top: calc(10px + var(--safe-t)); left: 50%; transform: translateX(-50%);
-  font: 800 clamp(46px, 8vw, 76px)/1 var(--display); letter-spacing: .02em;
+  font: 800 clamp(46px, calc(8 * var(--vw, 1vw)), 76px)/1 var(--display); letter-spacing: .02em;
   color: #fff; font-variant-numeric: tabular-nums;
   text-shadow: 0 3px 0 rgba(0, 40, 55, .65), 0 0 2px rgba(0, 40, 55, .8), 0 12px 34px rgba(0, 0, 0, .35);
 }
 #hudScore.pop { animation: pop .3s cubic-bezier(.2, .9, .3, 1.5); }
 @keyframes pop { 0% { transform: translateX(-50%) scale(1.32); } 100% { transform: translateX(-50%) scale(1); } }
-.hud-left { position: absolute; left: calc(14px + var(--safe-l)); top: calc(14px + var(--safe-t)); display: flex; flex-direction: column; gap: 6px; align-items: flex-start; max-width: 34vw; }
+.hud-left { position: absolute; left: calc(14px + var(--safe-l)); top: calc(14px + var(--safe-t)); display: flex; flex-direction: column; gap: 6px; align-items: flex-start; max-width: calc(34 * var(--vw, 1vw)); }
 .chip {
   font: 600 13px/1 var(--font); padding: 7px 11px; border-radius: 99px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%;
   background: rgba(5, 25, 34, .45); border: 1px solid var(--line); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
@@ -72,31 +84,31 @@ body.no-webgl #cvScene { background: #0f3b47; }
 /* ── banner ── */
 #banner {
   position: fixed; z-index: 4; left: 50%; top: 24%; transform: translate(-50%, -10px) scale(.96); opacity: 0;
-  pointer-events: none; text-align: center; transition: opacity .35s, transform .45s cubic-bezier(.2, .9, .3, 1.3); width: min(92vw, 640px);
+  pointer-events: none; text-align: center; transition: opacity .35s, transform .45s cubic-bezier(.2, .9, .3, 1.3); width: min(calc(92 * var(--vw, 1vw)), 640px);
 }
 #banner.show { opacity: 1; transform: translate(-50%, 0) scale(1); }
 /* while playing, banners sit compactly under the score instead of over the river ahead */
 body.playing #banner { top: calc(84px + var(--safe-t)); }
-body.playing #banner b { font-size: clamp(20px, 3.4vw, 32px); }
+body.playing #banner b { font-size: clamp(20px, calc(3.4 * var(--vw, 1vw)), 32px); }
 body.playing #banner span { font-size: 13px; margin-top: 4px; }
-#banner b { display: block; font: 800 clamp(30px, 6vw, 52px)/1.05 var(--display); letter-spacing: .03em; text-transform: uppercase;
+#banner b { display: block; font: 800 clamp(30px, calc(6 * var(--vw, 1vw)), 52px)/1.05 var(--display); letter-spacing: .03em; text-transform: uppercase;
   background: linear-gradient(180deg, #fff, #d6f6ff 55%, #8fdcf5); -webkit-background-clip: text; background-clip: text; color: transparent;
   filter: drop-shadow(0 3px 0 rgba(0, 40, 55, .6)) drop-shadow(0 10px 20px rgba(0, 0, 0, .35)); }
-#banner span { display: block; margin-top: 8px; font: 600 clamp(13px, 2.2vw, 17px) var(--font); color: #fff; text-shadow: 0 2px 6px rgba(0, 0, 0, .7); }
+#banner span { display: block; margin-top: 8px; font: 600 clamp(13px, calc(2.2 * var(--vw, 1vw)), 17px) var(--font); color: #fff; text-shadow: 0 2px 6px rgba(0, 0, 0, .7); }
 
 /* ── tap hint ── */
 #tapHint {
-  position: fixed; z-index: 4; left: 50%; bottom: calc(9vh + var(--safe-b)); transform: translateX(-50%); width: min(92vw, 520px);
+  position: fixed; z-index: 4; left: 50%; bottom: calc(calc(9 * var(--vh, 1vh)) + var(--safe-b)); transform: translateX(-50%); width: min(calc(92 * var(--vw, 1vw)), 520px);
   pointer-events: none; text-align: center; display: flex; flex-direction: column; align-items: center; gap: 6px;
   animation: hintIn .5s ease-out;
 }
 @keyframes hintIn { from { opacity: 0; transform: translate(-50%, 12px); } }
-#tapHint b { font: 700 clamp(16px, 2.6vw, 21px) var(--font); text-shadow: 0 2px 8px rgba(0, 0, 0, .7); }
+#tapHint b { font: 700 clamp(16px, calc(2.6 * var(--vw, 1vw)), 21px) var(--font); text-shadow: 0 2px 8px rgba(0, 0, 0, .7); }
 #tapHint span { font: 500 14px/1.45 var(--font); color: #e9f8ff; text-shadow: 0 1px 6px rgba(0, 0, 0, .85); }
 #tapHint em { font-style: normal; color: #ffd38a; font-weight: 700; }
 #tapHint .t2 { display: none; }
 #tapHint.playing .hand, #tapHint.playing b, #tapHint.playing .t1 { display: none; }
-#tapHint.playing { bottom: calc(4vh + var(--safe-b)); }
+#tapHint.playing { bottom: calc(calc(4 * var(--vh, 1vh)) + var(--safe-b)); }
 #tapHint.first .t2 { display: block; }
 .hand { position: relative; width: 56px; height: 56px; margin-bottom: 4px; }
 .hand svg { position: absolute; inset: 6px; width: 44px; height: 44px; animation: tap 1.1s ease-in-out infinite; filter: drop-shadow(0 4px 6px rgba(0, 0, 0, .4)); }
@@ -206,16 +218,16 @@ select option { background: #0e2f3b; }
 .set.toggle input:focus-visible + i { outline: 3px solid #9fe8ff; outline-offset: 2px; }
 
 /* menu */
-.menu-wrap { width: min(470px, 100%); margin-left: max(0px, calc(8vw - 40px)); margin-block: auto; display: flex; flex-direction: column; gap: 14px; }
+.menu-wrap { width: min(470px, 100%); margin-left: max(0px, calc(calc(8 * var(--vw, 1vw)) - 40px)); margin-block: auto; display: flex; flex-direction: column; gap: 14px; }
 .logo { text-align: center; padding-top: 4px; }
 .logo h1 {
-  margin: 0; padding-top: .08em; font: 800 clamp(58px, 11vw, 112px)/1.12 var(--display); letter-spacing: .06em;
+  margin: 0; padding-top: .08em; font: 800 clamp(58px, calc(11 * var(--vw, 1vw)), 112px)/1.12 var(--display); letter-spacing: .06em;
   background: linear-gradient(180deg, #ffffff 0%, #e2fbff 38%, #7fd8f0 70%, #2f9fc2 100%); -webkit-background-clip: text; background-clip: text; color: transparent;
   filter: drop-shadow(0 4px 0 rgba(0, 45, 62, .7)) drop-shadow(0 18px 28px rgba(0, 0, 0, .35));
   animation: bob 4s ease-in-out infinite;
 }
 @keyframes bob { 0%, 100% { transform: translateY(0) rotate(-.4deg); } 50% { transform: translateY(-5px) rotate(.4deg); } }
-.logo p { margin: 8px 0 0; font: 600 clamp(14px, 2.2vw, 18px) var(--font); letter-spacing: .12em; text-transform: uppercase; color: #ffe2c4; text-shadow: 0 2px 8px rgba(0, 0, 0, .6); }
+.logo p { margin: 8px 0 0; font: 600 clamp(14px, calc(2.2 * var(--vw, 1vw)), 18px) var(--font); letter-spacing: .12em; text-transform: uppercase; color: #ffe2c4; text-shadow: 0 2px 8px rgba(0, 0, 0, .6); }
 .keys { margin: 0; text-align: center; font-size: 12.5px; color: rgba(240, 250, 255, .78); text-shadow: 0 1px 4px rgba(0, 0, 0, .8); line-height: 1.9; }
 kbd { font: 600 11.5px var(--font); padding: 2px 7px; border-radius: 6px; background: rgba(0, 0, 0, .35); border: 1px solid var(--line); }
 
@@ -270,7 +282,7 @@ kbd { font: 600 11.5px var(--font); padding: 2px 7px; border-radius: 6px; backgr
 #toast {
   position: fixed; z-index: 30; left: 50%; bottom: calc(24px + var(--safe-b)); transform: translate(-50%, 20px); opacity: 0;
   padding: 11px 18px; border-radius: 14px; font: 600 14px var(--font); background: rgba(8, 30, 40, .85); border: 1px solid var(--line);
-  backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); transition: opacity .3s, transform .3s; pointer-events: none; max-width: 90vw; text-align: center;
+  backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); transition: opacity .3s, transform .3s; pointer-events: none; max-width: calc(90 * var(--vw, 1vw)); text-align: center;
 }
 #toast.show { opacity: 1; transform: translate(-50%, 0); }
 #fade { position: fixed; inset: 0; z-index: 20; background: #061a22; opacity: 0; pointer-events: none; transition: opacity .38s ease; }
@@ -303,7 +315,7 @@ kbd { font: 600 11.5px var(--font); padding: 2px 7px; border-radius: 6px; backgr
   .btn { min-height: 42px; padding: 8px 14px; }
   .bigscore span { font-size: 46px; }
   .keys { display: none; }
-  #tapHint { bottom: 4vh; }
+  #tapHint { bottom: calc(4 * var(--vh, 1vh)); }
 }
 @media (prefers-reduced-motion: reduce) {
   .logo h1, .hand svg, .hand .ring, #hudScore.pop, #tapHint { animation: none; }
@@ -313,3 +325,8 @@ kbd { font: 600 11.5px var(--font); padding: 2px 7px; border-radius: 6px; backgr
 /* kept out of the markup so the page also runs under a strict CSP (no inline styles) */
 .sprite { position: absolute; width: 0; height: 0; overflow: hidden; }
 .noscript { position: fixed; inset: 0; display: grid; place-items: center; color: #fff; }
+
+/* during play the HUD chips sit over a canvas that changes every frame: a backdrop blur there costs a
+   re-blur per frame (and on Macs keeps the page off the cheap overlay path) — use a solid tint instead */
+body.playing .chip, body.playing .iconbtn, body.playing .race { backdrop-filter: none; -webkit-backdrop-filter: none; background: rgba(5, 25, 34, .72); }
+#hudScore, #banner { will-change: transform, opacity; }

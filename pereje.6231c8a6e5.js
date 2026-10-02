@@ -2695,7 +2695,13 @@ const TICK_MS = 1000 / TICK_RATE;
 const TAU = Math.PI * 2;
 const $ = id => document.getElementById(id);
 const sm = t => { t = clamp(t, 0, 1); return t * t * (3 - 2 * t); };
-const hexRgb = h => [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)];
+// parsed once per colour: these run many times per frame and garbage here turns into GC pauses (stutter)
+const hexCache = new Map();
+const hexRgb = h => {
+  let c = hexCache.get(h);
+  if (!c) { if (hexCache.size > 4096) hexCache.clear(); c = [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)]; hexCache.set(h, c); }
+  return c;
+};
 const rgba = (h, a) => { const c = hexRgb(h); return `rgba(${c[0]},${c[1]},${c[2]},${a})`; };
 const mixHex = (a, b, t) => {
   const x = hexRgb(a), y = hexRgb(b);
@@ -2744,7 +2750,7 @@ const Store = {
   },
 };
 const reducedMotion = (() => { try { return matchMedia('(prefers-reduced-motion: reduce)').matches; } catch { return false; } })();
-const DEFAULTS = { name: '', sfx: 0.8, music: 0.5, amb: 0.7, ghosts: true, shake: !reducedMotion, haptics: true, hitbox: false, quality: 'auto', res: 'auto', tutorial: true, level: 1 };
+const DEFAULTS = { name: '', sfx: 0.8, music: 0.5, amb: 0.7, ghosts: true, shake: !reducedMotion, haptics: true, hitbox: false, quality: 'auto', res: 'auto', frame: isNative ? 'full' : '1280', fps: false, tutorial: true, level: 1 };
 const S = Object.assign({}, DEFAULTS, Store.get('settings', {}));
 const saveSettings = () => Store.set('settings', S);
 // Records are kept per difficulty level: a kids' score never competes with a pro's.
@@ -2861,9 +2867,25 @@ let qualityLevel = S.quality === 'low' ? 0 : S.quality === 'medium' ? 1 : 2;
 const RES_STEPS = ['auto', '480', '540', '720', '900', '1080'];
 const resCapHeight = () => S.res !== 'auto' && RES_STEPS.includes(S.res) ? +S.res : [480, 600, 720][qualityLevel];
 const resCapPixels = () => { const ch = resCapHeight(); return Math.round(ch * 16 / 9) * ch; };
-let layoutKey = '', viewKey = '';
+let layoutKey = '', viewKey = '', layoutAt = 0;
+// Max game size in CSS px. On a big monitor the game sits in a centred window instead of filling it:
+// less to draw, and at the 720p render cap a 1280×720 window is drawn 1:1 (crisp, no upscaling).
+const FRAMES = { 960: [960, 540], 1280: [1280, 720], 1600: [1600, 900] };
+const stageEl = $('stage');
+function stageSize() {
+  const W = Math.max(1, window.innerWidth), H = Math.max(1, window.innerHeight);
+  const f = !isNative && FRAMES[S.frame];
+  if (!f) return [W, H, W, H];
+  // only crop when the window is clearly bigger; a few stray pixels of border look like a bug
+  return [W <= f[0] * 1.15 ? W : f[0], H <= f[1] * 1.15 ? H : f[1], W, H];
+}
 function layout(force) {
-  const w = Math.max(1, window.innerWidth), h = Math.max(1, window.innerHeight);
+  const [w, h, W, H] = stageSize();
+  const st = stageEl.style;
+  st.width = w + 'px'; st.height = h + 'px'; st.left = Math.floor((W - w) / 2) + 'px'; st.top = Math.floor((H - h) / 2) + 'px';
+  document.body.classList.toggle('windowed', w < W || h < H);
+  const rs = document.documentElement.style;
+  rs.setProperty('--vw', w / 100 + 'px'); rs.setProperty('--vh', h / 100 + 'px');
   const maxDpr = qualityLevel === 2 ? 2 : qualityLevel === 1 ? 1.5 : 1;
   // Resolution cap: the scene is drawn at most this many pixels (720p by default) and the browser scales
   // it up to the window, so frame time stays flat on a 1440p/4K monitor or a high-DPI phone.
@@ -2872,7 +2894,7 @@ function layout(force) {
   if (w * h * dpr * dpr > BUDGET) dpr = Math.sqrt(BUDGET / (w * h));
   const key = [w, h, dpr.toFixed(3), qualityLevel, BUDGET].join('|');
   if (key === layoutKey && !force) return;
-  layoutKey = key;
+  layoutKey = key; layoutAt = performance.now();
   const ri = $('resInfo'); if (ri) ri.textContent = `teď ${Math.round(w * dpr)}×${Math.round(h * dpr)}`;
   V.w = w; V.h = h; V.dpr = dpr;
   V.s = Math.min(h / 700, w / 740);
@@ -2894,9 +2916,10 @@ function layout(force) {
   const g = vc.createRadialGradient(vigCv.width / 2, vigCv.height / 2, Math.min(vigCv.width, vigCv.height) * 0.3, vigCv.width / 2, vigCv.height / 2, Math.hypot(vigCv.width, vigCv.height) * 0.62);
   g.addColorStop(0, 'rgba(0,0,0,0)'); g.addColorStop(1, 'rgba(0,10,20,0.42)');
   vc.fillStyle = g; vc.fillRect(0, 0, vigCv.width, vigCv.height);
-  // cached art only depends on scale, pixel density and the vertical framing
-  const vk = [V.s.toFixed(4), Math.min(V.dpr, 1.5), V.dpr, V.camY.toFixed(2)].join('|');
-  if (vk !== viewKey) { viewKey = vk; chunks.clear(); bodies.clear(); }
+  // cached art depends on the world scale and vertical framing; a pure pixel-density change (quality
+  // governor, resolution setting) keeps it — tiles and sprites are drawn at world size and refresh lazily
+  const vk = [V.s.toFixed(4), V.camY.toFixed(2)].join('|');
+  if (vk !== viewKey) { viewKey = vk; for (const ch of chunks.values()) recycleChunk(ch); chunks.clear(); dropChunkJobs(); bodies.clear(); }
 }
 
 // ─── Game state ────────────────────────────────────────────────────────────
@@ -2917,6 +2940,7 @@ function viewCourse() { return G.state === 'menu' ? (G.attract && G.attract.cour
 // ─── Sprites & land chunks ─────────────────────────────────────────────────
 const sprites = new Map();
 const chunks = new Map();
+const chunkJobs = new Map();   // k → { it, chunk, vk }: chunks being painted ahead of the camera
 let chunkCourse = null;
 
 function seededR(seed) { let i = 0; return () => rnd(seed, i++); }
@@ -3009,14 +3033,16 @@ function paintRock(c, vr, v, B, withShadow = true) {
 // Body sprites (rocks, logs) live in a small LRU so long sessions don't hoard canvas memory.
 const bodies = new Map();
 function lruGet(key) { const sp = bodies.get(key); if (sp) { bodies.delete(key); bodies.set(key, sp); } return sp; }
-function lruPut(key, sp) { bodies.set(key, sp); while (bodies.size > 220) bodies.delete(bodies.keys().next().value); return sp; }
+function lruPut(key, sp) { bodies.set(key, sp); while (bodies.size > 360) bodies.delete(bodies.keys().next().value); return sp; }
 
-function rockSprite(vr, v, biome) {
+let spriteWarm = 0;   // new sprites the prewarm pass may still paint this frame
+function rockSprite(vr, v, biome, warm) {
   const px = V.s * V.dpr;
   const vq = Math.max(6, Math.round(vr / 3) * 3);          // radius buckets: 3 world units
   const key = 'r' + biome + '|' + (v % 24) + '|' + vq;
   const hit = lruGet(key);
-  if (hit) return hit;
+  if (hit) { if (hit.px === px || warm || spriteRefresh <= 0) return hit; spriteRefresh--; }
+  else if (warm) { if (spriteWarm <= 0) return null; spriteWarm--; }
   const pad = vq * 1.6;
   const size = Math.ceil(pad * 2 * px) + 2;
   const c = document.createElement('canvas');
@@ -3024,7 +3050,24 @@ function rockSprite(vr, v, biome) {
   const x = c.getContext('2d');
   x.setTransform(px, 0, 0, px, size / 2, size / 2);
   paintRock(x, vq, v % 24, BIOMES[biome]);
-  return lruPut(key, { c, half: size / 2 / px, vq });
+  return lruPut(key, { c, half: size / 2 / px, vq, px });
+}
+
+// fog wall art for one fog colour: the soft edge gradient (in local 0…120 coordinates) and a billow sprite
+const fogA = { col: '', edge: null, billow: null };
+function fogArt(col) {
+  if (fogA.col === col) return fogA;
+  fogA.col = col;
+  const e = ctx.createLinearGradient(0, 0, 120, 0);
+  e.addColorStop(0, rgba(col, 0)); e.addColorStop(0.65, rgba(col, 0.7)); e.addColorStop(1, rgba(col, 1));
+  fogA.edge = e;
+  if (!fogA.billow) { fogA.billow = document.createElement('canvas'); fogA.billow.width = fogA.billow.height = 96; }
+  const b = fogA.billow.getContext('2d');
+  b.clearRect(0, 0, 96, 96);
+  const pg = b.createRadialGradient(48, 48, 0, 48, 48, 48);
+  pg.addColorStop(0, rgba(col, 0.5)); pg.addColorStop(1, rgba(col, 0));
+  b.fillStyle = pg; b.fillRect(0, 0, 96, 96);
+  return fogA;
 }
 
 function glowSprite(color, key) {
@@ -3089,17 +3132,30 @@ function edgeLine(c, course, x0, x1, top, off) {
   }
 }
 
-function buildChunk(course, k) {
+const chunkPool = [];
+function recycleChunk(ch) { if (chunkPool.length < 8) chunkPool.push(ch.ground, ch.canopy); else { ch.ground.width = ch.canopy.width = 0; } }
+// A chunk painter that yields between stages, so the work can be spread over several frames.
+// The paint order and the seeded random sequence are identical however it is sliced.
+function* chunkJob(course, k, job) {
   const pxs = V.s * Math.min(V.dpr, 1.5);
   const PAD = 4;
   const x0 = k * CW - PAD, x1 = (k + 1) * CW + PAD;
   const PADY = 4 + 16 / V.s;            // covers the maximum screen-shake offset
   const y0 = V.camY - PADY, y1 = V.camY + V.visH + PADY;
   const W = Math.ceil((x1 - x0) * pxs), H = Math.ceil((y1 - y0) * pxs);
-  const mk = () => { const c = document.createElement('canvas'); c.width = W; c.height = H; const x = c.getContext('2d'); x.setTransform(pxs, 0, 0, pxs, -x0 * pxs, -y0 * pxs); return [c, x]; };
+  const mk = () => {
+    let c = chunkPool.pop();
+    if (c && (c.width !== W || c.height !== H)) { c.width = W; c.height = H; }   // resizing also clears it
+    if (!c) { c = document.createElement('canvas'); c.width = W; c.height = H; }
+    const x = c.getContext('2d');
+    x.setTransform(1, 0, 0, 1, 0, 0); x.clearRect(0, 0, W, H); x.globalAlpha = 1; x.globalCompositeOperation = 'source-over';
+    x.setTransform(pxs, 0, 0, pxs, -x0 * pxs, -y0 * pxs);
+    return [c, x];
+  };
   const [gc, g] = mk();
   const [cc, cn] = mk();
   const chunk = { k, x0, x1, y0, y1, ground: gc, canopy: cc, lights: [], hasCanopy: false };
+  job.chunk = chunk;
   const sd = hash32(course.seed, 0xC4A, k);
   const R = seededR(sd);
   const bm = x => biomeMix(course, x);
@@ -3118,6 +3174,7 @@ function buildChunk(course, k) {
     edgePath(g, course, x0, x1, top, top ? yTopFar : yBotFar);
     g.fillStyle = grad('ground'); g.fill();
   }
+  yield;
   // soft colour variation patches
   g.save();
   for (const top of [true, false]) { edgePath(g, course, x0, x1, top, top ? yTopFar : yBotFar); }
@@ -3125,6 +3182,7 @@ function buildChunk(course, k) {
   const landY = (top) => top ? y0 + R() * (BANK_MAX + 20 - y0) : RIVER_H - BANK_MAX - 20 + R() * (y1 - (RIVER_H - BANK_MAX - 20));
   // patches are placed in world space so neighbouring chunks paint identical overlaps (no seams)
   for (let cx = Math.floor((x0 - 110) / 96); cx <= Math.floor((x1 + 110) / 96); cx++) {
+    if (cx & 1) yield;
     for (let j = 0; j < 10; j++) {
       const h = hash32(course.seed, 0x9A7C, cx * 16 + j), r = q => rnd(h, q);
       const top = j < 5, x = (cx + r(1)) * 96;
@@ -3138,6 +3196,7 @@ function buildChunk(course, k) {
       g.fillStyle = pg; g.fillRect(x - rr, y - rr, rr * 2, rr * 2);
     }
   }
+  yield;
   // canyon strata / glacier drifts follow the shoreline (per-seed offsets, opacity per 64-unit segment)
   for (const top of [true, false]) {
     for (let i = 1; i <= 7; i++) {
@@ -3154,8 +3213,10 @@ function buildChunk(course, k) {
       }
     }
   }
+  yield;
   // grass tufts (batched)
   for (let col = 0; col < 3; col++) {
+    if (col) yield;
     g.beginPath();
     for (let i = 0; i < 170; i++) {
       const x = x0 + R() * (x1 - x0), top = R() < 0.5, y = landY(top);
@@ -3170,8 +3231,10 @@ function buildChunk(course, k) {
     g.strokeStyle = rgba(mixHex(BIOMES[m.a].grass[col], BIOMES[m.b].grass[col], m.t), 0.75);
     g.lineWidth = 1.1; g.lineCap = 'round'; g.stroke();
   }
+  yield;
   // flowers
   for (let i = 0; i < 70; i++) {
+    if (i === 35) yield;
     const x = x0 + R() * (x1 - x0), top = R() < 0.5, y = landY(top);
     const edge = top ? course.bankTop(x) : course.bankBot(x);
     if (top ? y > edge - 14 : y < edge + 14) continue;
@@ -3184,6 +3247,7 @@ function buildChunk(course, k) {
   }
   g.restore();
 
+  yield;
   // shoreline: sand / gravel band, wet line, pebbles
   for (const top of [true, false]) {
     const m = bm((x0 + x1) / 2);
@@ -3204,6 +3268,7 @@ function buildChunk(course, k) {
       g.beginPath(); g.ellipse(x, y, pr * 1.3, pr, R() * 3, 0, TAU); g.fill();
     }
   }
+  yield;
   // reeds / lily pads near the water (visual only, never inside the corridor's gaps)
   for (let x = x0 + 4; x < x1; x += 14) {
     const h = hash32(course.seed, 0x7EED, Math.floor(x / 14));
@@ -3234,6 +3299,7 @@ function buildChunk(course, k) {
     }
   }
 
+  yield;
   // trees, bushes, boulders: shadows on ground, canopies on top layer
   const items = [];
   forDecor(course, x0 - 60, x1 + 60, y0 - 60, y1 + 60, it => items.push(it));
@@ -3244,12 +3310,15 @@ function buildChunk(course, k) {
     g.fillStyle = 'rgba(5,20,10,0.28)';
     g.beginPath(); g.ellipse(it.x + s * 0.35, it.y + s * 0.42, s * 1.02, s * 0.88, 0.3, 0, TAU); g.fill();
   }
+  let nDecor = 0;
   for (const it of items) {
+    if (++nDecor % 10 === 0) yield;
     const B = BIOMES[it.bi];
     if (it.type === 'boulder') { g.save(); g.translate(it.x, it.y); paintRock(g, it.size, it.v, B); g.restore(); continue; }
     paintTree(cn, it, B);
     chunk.hasCanopy = true;
   }
+  yield;
   // campfires (night) — live lights
   for (let i = 0; i < 2; i++) {
     const x = x0 + 60 + R() * (x1 - x0 - 120);
@@ -3264,6 +3333,12 @@ function buildChunk(course, k) {
     chunk.lights.push({ x, y, kind: 'fire' });
   }
   return chunk;
+}
+function buildChunk(course, k) {
+  const it = chunkJob(course, k, {});
+  let r;
+  while (!(r = it.next()).done);
+  return r.value;
 }
 
 function paintTree(c, it, B) {
@@ -3337,19 +3412,42 @@ function paintTree(c, it, B) {
   }
 }
 
-let idleBuild = 0;
+// Land art depends only on seed + level + framing, so a retry of the same river keeps its chunks.
+let chunkCourseKey = '';
+function dropChunkJob(k, j) { if (j.chunk) recycleChunk(j.chunk); chunkJobs.delete(k); }
+function dropChunkJobs() { for (const [k, j] of chunkJobs) dropChunkJob(k, j); }
 function ensureChunks(course) {
-  if (chunkCourse !== course) { chunks.clear(); chunkCourse = course; }
+  const ck = course.seed + '|' + course.level;
+  if (chunkCourseKey !== ck) { for (const ch of chunks.values()) recycleChunk(ch); chunks.clear(); dropChunkJobs(); chunkCourseKey = ck; }
+  chunkCourse = course;
   const k0 = Math.floor((V.camX - 10) / CW), k1 = Math.floor((V.camX + V.visW + 10) / CW);
-  for (const [k] of chunks) if (k < k0 - 1 || k > k1 + 2) chunks.delete(k);
-  for (let k = k0; k <= k1; k++) if (!chunks.has(k)) chunks.set(k, buildChunk(course, k));
-  // build the next chunk ahead of time, in idle time when the browser offers it
-  const ahead = k1 + 1;
-  if (!chunks.has(ahead) && !idleBuild) {
-    const run = () => { idleBuild = 0; if (chunkCourse === course && !chunks.has(ahead)) chunks.set(ahead, buildChunk(course, ahead)); };
-    idleBuild = window.requestIdleCallback ? requestIdleCallback(run, { timeout: 300 }) : setTimeout(run, 16);
+  for (const [k, ch] of chunks) if (k < k0 - 1 || k > k1 + 2) { recycleChunk(ch); chunks.delete(k); }
+  for (const [k, j] of chunkJobs) if (k < k0 || k > k1 + 2 || j.vk !== viewKey) dropChunkJob(k, j);
+  // a chunk that is already on screen must exist now: finish its job (or paint it) synchronously
+  for (let k = k0; k <= k1; k++) if (!chunks.has(k)) {
+    const j = chunkJobs.get(k);
+    if (j) { let r; while (!(r = j.it.next()).done); chunks.set(k, r.value); chunkJobs.delete(k); }
+    else chunks.set(k, buildChunk(course, k));
+  }
+  // the next two are painted ahead of time, a slice per frame (pumpChunkJobs)
+  for (let k = k1 + 1; k <= k1 + 2; k++) if (!chunks.has(k) && !chunkJobs.has(k)) {
+    const job = { chunk: null, vk: viewKey, it: null };
+    job.it = chunkJob(course, k, job);
+    chunkJobs.set(k, job);
   }
   return [k0, k1];
+}
+// Runs after the frame is drawn: keeps painting queued chunks for a few milliseconds.
+function pumpChunkJobs(frameStart) {
+  if (!chunkJobs.size) return;
+  const t0 = performance.now(), budget = clamp(10 - (t0 - frameStart), 1.5, 4);
+  for (const [k, j] of chunkJobs) {
+    for (;;) {
+      const r = j.it.next();
+      if (r.done) { chunks.set(k, r.value); chunkJobs.delete(k); break; }
+      if (performance.now() - t0 > budget) return;
+    }
+  }
 }
 
 // ─── Particles ─────────────────────────────────────────────────────────────
@@ -3367,15 +3465,17 @@ const ghostTrails = new Map();
 
 function updateParticles(dt, course) {
   const flow = course ? course.speedAt(V.camX) * 0.6 : 140;
+  // damping per second, not per frame: same motion at 60/120/144 Hz and across long frames
+  const f = dt * 60, d96 = Math.pow(0.96, f), d985 = Math.pow(0.985, f), d98 = Math.pow(0.98, f), d93 = Math.pow(0.93, f);
   for (let i = parts.length - 1; i >= 0; i--) {
     const p = parts[i];
     p.age += dt;
     if (p.age >= p.life) { parts[i] = parts[parts.length - 1]; parts.pop(); continue; }
     switch (p.k) {
       case 'drop': p.vz -= 900 * dt; p.z += p.vz * dt; p.x += p.vx * dt; p.y += p.vy * dt; if (p.z < 0) { p.age = p.life; } break;
-      case 'foam': p.x += (flow + (p.vx || 0)) * dt; p.y += (p.vy || 0) * dt; p.vx = (p.vx || 0) * 0.96; p.vy = (p.vy || 0) * 0.96; break;
-      case 'splinter': p.x += p.vx * dt; p.y += p.vy * dt; p.vx *= 0.985; p.vy *= 0.985; p.x += flow * 0.6 * dt; p.rot += p.vr * dt; p.vr *= 0.98; break;
-      case 'spark': p.x += p.vx * dt; p.y += p.vy * dt; p.vx *= 0.93; p.vy *= 0.93; break;
+      case 'foam': p.x += (flow + (p.vx || 0)) * dt; p.y += (p.vy || 0) * dt; p.vx = (p.vx || 0) * d96; p.vy = (p.vy || 0) * d96; break;
+      case 'splinter': p.x += p.vx * dt; p.y += p.vy * dt; p.vx *= d985; p.vy *= d985; p.x += flow * 0.6 * dt; p.rot += p.vr * dt; p.vr *= d98; break;
+      case 'spark': p.x += p.vx * dt; p.y += p.vy * dt; p.vx *= d93; p.vy *= d93; break;
       case 'leaf':
         if (p.z > 0) { p.z -= 22 * dt; p.x += p.vx * dt + Math.sin(VT * 2 + p.ph) * 14 * dt; p.y += p.vy * dt; p.rot += p.vr * dt; }
         else { p.z = 0; p.x += flow * dt; p.rot += p.vr * 0.1 * dt; }
@@ -3405,11 +3505,12 @@ function ambient(dt, course) {
     if (n < 34 * flies) spawn({ k: 'fly', x: x0 + Math.random() * (x1 - x0), y: Math.random() < 0.5 ? y0 + Math.random() * (BANK_MAX + 60 - y0) : RIVER_H - BANK_MAX - 60 + Math.random() * (y1 - RIVER_H + BANK_MAX + 60), ph: 0, s: Math.random() * 10, life: 5 + Math.random() * 5 });
   }
   const sn = w('snow');
-  if (sn > 0.05) for (let i = 0; i < 3; i++) if (rate(26 * sn)) spawn({ k: 'snow', x: x0 + Math.random() * (x1 - x0), y: y0 - 10 + Math.random() * (y1 - y0), vx: 18, vy: 24 + Math.random() * 20, ph: Math.random() * 6, life: 6, s: 0.8 + Math.random() * 1.8 });
+  if (sn > 0.05) for (let i = 0, n = qualityLevel === 2 ? 2 : 1; i < n; i++) if (rate(26 * sn)) spawn({ k: 'snow', x: x0 + Math.random() * (x1 - x0), y: y0 - 10 + Math.random() * (y1 - y0), vx: 18, vy: 24 + Math.random() * 20, ph: Math.random() * 6, life: 6, s: 0.8 + Math.random() * 1.8 });
 }
 
 // ─── Boat drawing ──────────────────────────────────────────────────────────
 const HULL = { player: ['#ff7a45', '#e4572e', '#a5321a'], ghost: ['#9fe8ff', '#4cc3f0', '#1d7fa8'], pb: ['#e3c8ff', '#b18cf0', '#7552b8'] };
+const hullGrads = new Map();
 function drawBoat(c, x, y, ang, pad, style, alpha = 1, night = 0) {
   const [hl, hb, hd] = HULL[style] || HULL.player;
   c.save();
@@ -3427,8 +3528,9 @@ function drawBoat(c, x, y, ang, pad, style, alpha = 1, night = 0) {
   c.beginPath(); c.moveTo(22, -7); c.quadraticCurveTo(33, 0, 22, 7); c.stroke();
   // hull
   c.beginPath(); c.moveTo(31, 0); c.bezierCurveTo(21, -12.2, -21, -12.2, -30, 0); c.bezierCurveTo(-21, 12.2, 21, 12.2, 31, 0); c.closePath();
-  const g = c.createLinearGradient(0, -9, 0, 9);
-  g.addColorStop(0, hl); g.addColorStop(0.5, hb); g.addColorStop(1, hd);
+  const gk = hl + hb + hd;
+  let g = hullGrads.get(gk);
+  if (!g) { g = c.createLinearGradient(0, -9, 0, 9); g.addColorStop(0, hl); g.addColorStop(0.5, hb); g.addColorStop(1, hd); if (hullGrads.size > 64) hullGrads.clear(); hullGrads.set(gk, g); }
   c.fillStyle = g; c.fill();
   c.strokeStyle = 'rgba(40,10,0,0.45)'; c.lineWidth = 0.9; c.stroke();
   // deck ridge + stripe
@@ -3530,6 +3632,35 @@ function paintLog(c, L, r, v, B, boom) {
   }
 }
 
+// 16 grain variants per length bucket: most log gates now reuse sprites instead of painting new ones
+function logSprite(s, L, r, biome, boom, warm) {
+  const px = V.s * V.dpr, Lq = Math.round(L / 4) * 4, lv = s.v % 16;
+  const key = 'L' + biome + '|' + lv + '|' + Lq + '|' + Math.round(r * 2) + '|' + (boom ? 1 : 0);
+  const hit = lruGet(key);
+  if (hit) { if (hit.px === px || warm || spriteRefresh <= 0) return hit; spriteRefresh--; }
+  else if (warm) { if (spriteWarm <= 0) return null; spriteWarm--; }
+  const left = r + 2, right = Lq + r * 2 + 3, half = r + 2;
+  const cvs = document.createElement('canvas');
+  cvs.width = Math.ceil((left + right) * px); cvs.height = Math.ceil(half * 2 * px);
+  const x = cvs.getContext('2d');
+  x.setTransform(px, 0, 0, px, left * px, half * px);
+  paintLog(x, Lq, r, lv, BIOMES[biome], boom);
+  return lruPut(key, { c: cvs, left, w: left + right, half, Lq, px });
+}
+// Paints the sprites of gates that are still hidden in the fog (up to 3 new ones per frame),
+// so a gate never has to be painted in the frame it appears.
+function prewarmSprites(course, revealX) {
+  spriteWarm = 3;
+  for (let gi = course.gateIndexAt(revealX - 300); gi < course.gates.length; gi++) {
+    const g = course.gates[gi];
+    if (g.x - g.halfW > revealX + 700) break;
+    if (g.kind === 'rocks') { for (const s2 of g.shapes) if (!rockSprite(s2.r / 0.92, s2.v, g.biome, true)) return; }
+    else if (g.kind === 'logs' || g.kind === 'boom') {
+      for (const s2 of g.shapes) if (!logSprite(s2, Math.hypot(s2.x2 - s2.x1, s2.y2 - s2.y1), s2.r / 0.92, g.biome, g.kind === 'boom', true)) return;
+    }
+  }
+}
+
 function drawLog(c, s, off, biome, boom) {
   let x1 = s.x1, y1 = s.y1 + off, x2 = s.x2, y2 = s.y2 + off;
   // the decorated tip (cut end / buoy) always faces the river, never the bank
@@ -3540,18 +3671,7 @@ function drawLog(c, s, off, biome, boom) {
   c.save(); c.translate(x1 + 6, y1 + 9); c.rotate(a);
   c.fillStyle = 'rgba(0,15,25,0.26)'; capsulePath(c, L, r * 1.05); c.fill();
   c.restore();
-  const px = V.s * V.dpr, Lq = Math.round(L / 4) * 4;
-  const key = 'L' + biome + '|' + s.v + '|' + Lq + '|' + Math.round(r * 2) + '|' + (boom ? 1 : 0);
-  let sp = lruGet(key);
-  if (!sp) {
-    const left = r + 2, right = Lq + r * 2 + 3, half = r + 2;
-    const cvs = document.createElement('canvas');
-    cvs.width = Math.ceil((left + right) * px); cvs.height = Math.ceil(half * 2 * px);
-    const x = cvs.getContext('2d');
-    x.setTransform(px, 0, 0, px, left * px, half * px);
-    paintLog(x, Lq, r, s.v, BIOMES[biome], boom);
-    sp = lruPut(key, { c: cvs, left, w: left + right, half, Lq });
-  }
+  const sp = logSprite(s, L, r, biome, boom, false);
   const k = L / (sp.Lq || 1);
   c.save(); c.translate(x1, y1); c.rotate(a); c.scale(k, 1);
   c.drawImage(sp.c, -sp.left, -sp.half, sp.w, sp.half * 2);
@@ -3618,6 +3738,7 @@ function drawDeck(c, g, B, alpha) {
   c.restore();
 }
 
+let starGrad = null;
 function drawStar(c, s, t, a) {
   const bob = Math.sin(t * 3 + s.id) * 1.5;
   c.save(); c.translate(s.x, s.y + bob); c.globalAlpha = a;
@@ -3633,9 +3754,8 @@ function drawStar(c, s, t, a) {
   c.beginPath();
   for (let i = 0; i < 10; i++) { const ang = -Math.PI / 2 + i * Math.PI / 5, r = i % 2 ? 6.2 : 14; c.lineTo(Math.cos(ang) * r, Math.sin(ang) * r); }
   c.closePath();
-  const g = c.createLinearGradient(-10, -12, 10, 12);
-  g.addColorStop(0, '#fff6c2'); g.addColorStop(0.45, '#ffcf3d'); g.addColorStop(1, '#e08a12');
-  c.fillStyle = g; c.fill();
+  if (!starGrad) { starGrad = c.createLinearGradient(-10, -12, 10, 12); starGrad.addColorStop(0, '#fff6c2'); starGrad.addColorStop(0.45, '#ffcf3d'); starGrad.addColorStop(1, '#e08a12'); }
+  c.fillStyle = starGrad; c.fill();
   c.strokeStyle = '#a85a06'; c.lineWidth = 1.2; c.stroke();
   c.fillStyle = 'rgba(255,255,255,0.8)'; c.beginPath(); c.ellipse(-3, -5, 2.4, 1.4, -0.6, 0, TAU); c.fill();
   c.restore();
@@ -3675,7 +3795,9 @@ function sternPoint(x, y, vx, vy) {
   return { x: x - Math.cos(a) * 25, y: y - Math.sin(a) * 25 };
 }
 
+let spriteRefresh = 0;   // sprites re-drawn per frame after a pixel-density change (spread, no hitch)
 function render(now, dt) {
+  spriteRefresh = 2;
   const course = viewCourse();
   if (!course) return;
   const alpha = renderAlpha(now);
@@ -3825,6 +3947,7 @@ function render(now, dt) {
     }
     c.globalAlpha = 1;
   }
+  prewarmSprites(course, revealX);
   const taken = sim ? sim.taken : [];
   const visStars = [];
   for (let si = course.starIndexAt(V.camX - 40); si < course.stars.length; si++) {
@@ -3904,21 +4027,19 @@ function render(now, dt) {
   c.globalAlpha = 1; c.globalCompositeOperation = 'source-over';
 
   // ── the fog wall: fully opaque from the reveal line on, with soft world-anchored billows ──
-  const mistC = mixHex(Ba.mist, Bb.mist, bm.t);
-  const fogC = mixHex(mistC, '#0b1626', night * 0.72);
+  // colour quantised to 1/64 steps so the cached gradient/sprite only rebuilds during transitions
+  const mistC = mixHex(Ba.mist, Bb.mist, Math.round(bm.t * 64) / 64);
+  const fogC = mixHex(mistC, '#0b1626', Math.round(night * 0.72 * 64) / 64);
   const fogEnd = V.camX + V.visW + 60;
   if (revealX - 140 < fogEnd) {
-    const mg = c.createLinearGradient(revealX - 120, 0, revealX, 0);
-    mg.addColorStop(0, rgba(fogC, 0)); mg.addColorStop(0.65, rgba(fogC, 0.7)); mg.addColorStop(1, rgba(fogC, 1));
-    c.fillStyle = mg; c.fillRect(revealX - 120, V.camY - 40, 120, V.visH + 80);
+    const F = fogArt(fogC);
+    c.translate(revealX - 120, 0); c.fillStyle = F.edge; c.fillRect(0, V.camY - 40, 120, V.visH + 80); c.translate(120 - revealX, 0);
     c.fillStyle = fogC; c.fillRect(revealX - 0.5, V.camY - 40, Math.max(0, fogEnd - revealX + 0.5), V.visH + 80);
     for (let i = -3; i <= 11; i++) {
       const y = i * 72 + Math.sin(VT * 0.35 + i * 1.9) * 22;
       if (y < V.camY - 140 || y > V.camY + V.visH + 140) continue;
       const x = revealX - 40 + Math.sin(VT * 0.27 + i * 2.3) * 18, r = 70 + 22 * Math.sin(i * 2.7 + VT * 0.21);
-      const pg = c.createRadialGradient(x, y, 0, x, y, r);
-      pg.addColorStop(0, rgba(fogC, 0.5)); pg.addColorStop(1, rgba(fogC, 0));
-      c.fillStyle = pg; c.fillRect(x - r, y - r, r * 2, r * 2);
+      c.drawImage(F.billow, x - r, y - r, r * 2, r * 2);
     }
   }
 
@@ -4460,9 +4581,10 @@ function updatePlay(now) {
   updateRaceHud();
 }
 
+let raceHtml = '';
 function updateRaceHud() {
   const el = $('hudRace');
-  if (!G.sim || !G.ghosts.length || !S.ghosts) { if (el.innerHTML) el.innerHTML = ''; return; }
+  if (!G.sim || !G.ghosts.length || !S.ghosts) { if (raceHtml) { el.innerHTML = raceHtml = ''; } return; }
   let html = '';
   for (const gh of G.ghosts) {
     const target = gh.finalScore;
@@ -4470,7 +4592,7 @@ function updateRaceHud() {
     const cls = mine > target ? 'ahead' : mine === target ? 'even' : 'behind';
     html += `<div class="race ${gh.style} ${cls}"><span class="dot"></span><b>${escapeHtml(gh.name)}</b><span>${mine > target ? '✓ překonáno' : 'cíl ' + target}</span></div>`;
   }
-  if (el.innerHTML !== html) el.innerHTML = html;
+  if (raceHtml !== html) el.innerHTML = raceHtml = html;
 }
 
 function onPlayerCrash(sim, ev) {
@@ -4663,6 +4785,7 @@ window.addEventListener('keydown', e => {
   if (TAP_KEYS.has(e.code) && (G.state === 'play' || G.state === 'ready')) { e.preventDefault(); if (!e.repeat) press(e.timeStamp); return; }
   if (TAP_KEYS.has(e.code) && G.state === 'paused' && G.resumeAt) { e.preventDefault(); return; }  // countdown running
   if (e.code === 'KeyH' && e.shiftKey) { S.hitbox = !S.hitbox; saveSettings(); }
+  if (e.code === 'KeyF' && e.shiftKey) { S.fps = !S.fps; saveSettings(); applyFps(); $('setFps').checked = S.fps; }
 });
 window.addEventListener('blur', () => { if (G.state === 'play') pause(); else cancelResume(); });
 document.addEventListener('visibilitychange', () => {
@@ -4965,6 +5088,7 @@ function syncSettingsUI() {
   $('setSfx').value = S.sfx; $('setMusic').value = S.music; $('setAmb').value = S.amb;
   $('setGhosts').checked = S.ghosts; $('setShake').checked = S.shake; $('setHaptics').checked = S.haptics; $('setHitbox').checked = S.hitbox;
   $('setQuality').value = S.quality; $('setRes').value = RES_STEPS.includes(S.res) ? S.res : 'auto'; $('setName').value = S.name;
+  $('setFrame').value = FRAMES[S.frame] ? S.frame : 'full'; $('setFps').checked = S.fps;
 }
 ['setSfx', 'setMusic', 'setAmb'].forEach(id => $(id).addEventListener('input', e => {
   const k = { setSfx: 'sfx', setMusic: 'music', setAmb: 'amb' }[id];
@@ -4980,25 +5104,62 @@ $('setQuality').addEventListener('change', e => {
   layout();
 });
 $('setRes').addEventListener('change', e => { S.res = e.target.value; saveSettings(); layout(true); });
+$('setFrame').addEventListener('change', e => { S.frame = e.target.value; saveSettings(); layout(true); });
+$('setFps').addEventListener('change', e => { S.fps = e.target.checked; saveSettings(); A.ui('toggle'); applyFps(); });
 $('setName').addEventListener('input', e => { S.name = e.target.value.slice(0, 16); saveSettings(); $('nameInput').value = S.name; });
 
 // ─── Performance governor ─────────────────────────────────────────────────
 // Judges frame time against the display's own refresh interval (a 30 Hz-capped phone is not "slow"),
 // steps quality down after sustained trouble and tries one step back up after a long calm period.
-const perf = { ema: 16, base: 0, slowFor: 0, calmFor: 0, locked: S.quality !== 'auto' };
-function perfMonitor(dtMs) {
-  perf.base = perf.base ? Math.min(dtMs, perf.base * 1.0015 + 0.0005) : dtMs;
+const perf = { ema: 16, base: 16.7, slowFor: 0, calmFor: 0, locked: S.quality !== 'auto', hist: new Float32Array(120), hi: 0, misses: 0, upAt: 0, upFails: 0, lastUp: -1e9 };
+const REFRESH = [1000 / 240, 1000 / 165, 1000 / 144, 1000 / 120, 1000 / 100, 1000 / 90, 1000 / 75, 1000 / 60, 1000 / 50, 1000 / 30];
+function perfMonitor(dtMs, now) {
+  // refresh period: a low percentile of recent frame times, snapped to a common display rate
+  const h = perf.hist, old = h[perf.hi];
+  if (old > 0 && old > perf.base * 1.5) perf.misses--;
+  h[perf.hi] = dtMs; perf.hi = (perf.hi + 1) % h.length;
+  if (perf.hi === 0) {
+    const s = Array.from(h).filter(v => v > 0).sort((a, b) => a - b);
+    let p = s[Math.floor(s.length * 0.2)] || 16.7;
+    for (const r of REFRESH) if (Math.abs(p - r) < r * 0.1) { p = r; break; }
+    perf.base = p; perf.misses = 0;
+    for (const v of h) if (v > p * 1.5) perf.misses++;
+  } else if (dtMs > perf.base * 1.5) perf.misses++;
   perf.ema = perf.ema * 0.95 + dtMs * 0.05;
-  if (perf.locked || document.hidden || G.state === 'paused') return;
-  const slow = perf.ema > Math.max(19, perf.base * 1.5);
+  if (perf.locked || document.hidden || G.state === 'paused' || now - layoutAt < 1000) return;
+  // slow = sustained dropped frames (judder), not just a low average
+  const slow = perf.misses > h.length * 0.12 || perf.ema > perf.base * 1.6;
   if (slow && qualityLevel > 0) {
     perf.slowFor += dtMs; perf.calmFor = 0;
-    if (perf.slowFor > 3000) { qualityLevel--; perf.slowFor = 0; perf.ema = perf.base; layout(); }
+    if (perf.slowFor > 3000) {
+      if (now - perf.lastUp < 30000) { perf.upFails++; perf.upAt = now + 120000 * 2 ** perf.upFails; }   // that step up did not hold
+      qualityLevel--; perf.slowFor = 0; layout();
+    }
   } else {
     perf.slowFor = Math.max(0, perf.slowFor - dtMs * 0.5);
-    if (qualityLevel < 2 && perf.ema < perf.base * 1.12) { perf.calmFor += dtMs; if (perf.calmFor > 25000) { qualityLevel++; perf.calmFor = -60000; layout(); } }
+    if (!slow && qualityLevel < 2) perf.calmFor += dtMs;
+    // step back up only between runs (a resize mid-run is a visible hitch) and not soon after a failed try
+    if (perf.calmFor > 20000 && now >= perf.upAt && perf.upFails < 3 && G.state !== 'play' && G.state !== 'dead') {
+      qualityLevel++; perf.calmFor = 0; perf.lastUp = now; layout();
+    }
   }
 }
+
+// ─── FPS meter ─────────────────────────────────────────────────────────────
+const fpsEl = $('fpsMeter');
+const fpsM = { n: 0, sum: 0, max: 0, at: 0 };
+function applyFps() { fpsEl.classList.toggle('hidden', !S.fps); fpsM.n = fpsM.sum = fpsM.max = 0; fpsM.at = performance.now(); }
+function fpsMeter(now, ms) {
+  if (!S.fps) return;
+  if (ms > 0 && ms < 1000) { fpsM.n++; fpsM.sum += ms; if (ms > fpsM.max) fpsM.max = ms; }
+  if (now - fpsM.at < 500 || !fpsM.n) return;
+  const fps = 1000 * fpsM.n / fpsM.sum;
+  fpsEl.textContent = `${Math.round(fps)} FPS · max ${Math.round(fpsM.max)} ms · ${cv.width}×${cv.height}`;
+  fpsEl.classList.toggle('warn', fps < 50 || fpsM.max > 40);
+  fpsEl.classList.toggle('bad', fps < 30 || fpsM.max > 100);
+  fpsM.n = fpsM.sum = fpsM.max = 0; fpsM.at = now;
+}
+applyFps();
 
 // ─── Main loop ─────────────────────────────────────────────────────────────
 function frame(now) {
@@ -5008,7 +5169,7 @@ function frame(now) {
 function tickFrame(now) {
   const rawMs = now - lastNow;
   lastNow = now;
-  const dt = clamp(rawMs, 0, 100) / 1000;
+  const dt = clamp(rawMs, 0, 18 * TICK_MS) / 1000;
   const t0 = performance.now();
   pollGamepads();
   tickResume(now);
@@ -5026,7 +5187,9 @@ function tickFrame(now) {
   }
   render(now, paused ? 0 : dt);
   lastFrameMs = performance.now() - t0;
-  if (rawMs < 250) perfMonitor(rawMs);
+  if (rawMs > 0 && rawMs < 250) perfMonitor(rawMs, now);
+  pumpChunkJobs(t0);
+  fpsMeter(now, rawMs);
 }
 
 // ─── Boot ──────────────────────────────────────────────────────────────────

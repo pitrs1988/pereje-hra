@@ -8,7 +8,7 @@
 <meta name="description" content="PEŘEJE — říční výzva. Pádluj loďkou mezi skalami, kládami a pilíři mostů, sbírej hvězdy a vyzvi přátele na stejnou řeku.">
 <title>PEŘEJE — říční výzva</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230d3a4a'/%3E%3Cpath d='M6 40c8-6 16 6 26 0s18 6 26 0' stroke='%235fd4ff' stroke-width='5' fill='none' stroke-linecap='round'/%3E%3Cpath d='M14 30c6-6 30-6 36 0c-6 5-30 5-36 0z' fill='%23ff6a3d'/%3E%3Ccircle cx='31' cy='29' r='4' fill='%232f7fd6'/%3E%3C/svg%3E">
-<link rel="stylesheet" href="pereje.1243c30db7.css">
+<link rel="stylesheet" href="pereje.a25d80cda5.css">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="icon-180.png">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -35,6 +35,7 @@
   <symbol id="i-star" viewBox="0 0 24 24"><path d="m12 2.8 2.7 5.9 6.4.7-4.8 4.3 1.4 6.3L12 16.8 6.3 20l1.4-6.3-4.8-4.3 6.4-.7z" fill="currentColor"/></symbol>
 </svg>
 
+<div id="stage">
 <canvas id="cvWater" aria-hidden="true"></canvas>
 <canvas id="cvScene" role="img" aria-label="Herní plocha — řeka"></canvas>
 <div id="tapLayer" class="hidden" aria-hidden="true"></div>
@@ -183,10 +184,13 @@
       <select id="setQuality"><option value="auto">Automaticky</option><option value="high">Vysoká</option><option value="medium">Střední</option><option value="low">Nízká</option></select></label>
     <label class="set"><span>Max. rozlišení <small id="resInfo"></small></span>
       <select id="setRes"><option value="auto">Automaticky (do 720p)</option><option value="480">480p – nejrychlejší</option><option value="540">540p</option><option value="720">720p</option><option value="900">900p</option><option value="1080">1080p – nejostřejší</option></select></label>
+    <label class="set web-only"><span>Velikost hry</span>
+      <select id="setFrame"><option value="960">Malé okno (960×540)</option><option value="1280">Okno (1280×720)</option><option value="1600">Velké okno (1600×900)</option><option value="full">Celá obrazovka</option></select></label>
     <label class="set toggle"><span>Duchové soupeřů a rekordu</span><input id="setGhosts" type="checkbox"><i></i></label>
     <label class="set toggle"><span>Otřesy obrazovky</span><input id="setShake" type="checkbox"><i></i></label>
     <label class="set toggle"><span>Vibrace</span><input id="setHaptics" type="checkbox"><i></i></label>
     <label class="set toggle"><span>Zobrazit hitboxy <small>(Shift+H)</small></span><input id="setHitbox" type="checkbox"><i></i></label>
+    <label class="set toggle"><span>Ukazatel FPS <small>(Shift+F)</small></span><input id="setFps" type="checkbox"><i></i></label>
   </div>
 </section>
 
@@ -216,8 +220,10 @@
 
 <div id="toast" role="status"></div>
 <div id="fade"></div>
+<div id="fpsMeter" class="hidden" aria-hidden="true"></div>
+</div>
 <noscript><p class="noscript">Hra potřebuje JavaScript.</p></noscript>
 
-<script src="pereje.6bb2b3c9ae.js"></script>
+<script src="pereje.6231c8a6e5.js"></script>
 </body>
 </html>
