@@ -624,12 +624,36 @@ function createWaterRenderer(canvas) {
 
   const CTX_OPTS = {
     alpha: false, antialias: false, premultipliedAlpha: false,
-    preserveDrawingBuffer: false, powerPreference: 'high-performance'
+    preserveDrawingBuffer: false, powerPreference: 'high-performance',
+    // a software rasteriser (GPU acceleration off / blocklisted) would run this shader on the CPU at a
+    // few fps — refuse it and let the game use its cheap 2D water instead
+    failIfMajorPerformanceCaveat: true
   };
+  const rendererOf = c => {
+    try { const ext = c.getExtension('WEBGL_debug_renderer_info'); return String(c.getParameter(ext ? ext.UNMASKED_RENDERER_WEBGL : c.RENDERER) || ''); } catch (err) { return ''; }
+  };
+  const SOFTWARE = /swiftshader|llvmpipe|softpipe|software|basic render/i;
 
   let gl = null;
   try { gl = canvas.getContext('webgl2', CTX_OPTS); } catch (err) { gl = null; }
-  if (!gl) { console.warn('[water] WebGL2 is not available'); return null; }
+  if (!gl) {
+    // tell "no WebGL2 at all" apart from "only a slow software WebGL2"
+    let probe = null;
+    try { probe = document.createElement('canvas').getContext('webgl2'); } catch (err) { probe = null; }
+    createWaterRenderer.reason = probe ? 'software' : 'none';
+    createWaterRenderer.renderer = probe ? rendererOf(probe) : '';
+    try { if (probe) { const lc = probe.getExtension('WEBGL_lose_context'); if (lc) lc.loseContext(); } } catch (err) { /* ignore */ }
+    console.warn('[water] ' + (probe ? 'only software WebGL2 (' + createWaterRenderer.renderer + ')' : 'WebGL2 is not available') + ', using 2D water');
+    return null;
+  }
+  const renderer = rendererOf(gl);
+  if (SOFTWARE.test(renderer)) {
+    createWaterRenderer.reason = 'software'; createWaterRenderer.renderer = renderer;
+    console.warn('[water] software WebGL2 (' + renderer + '), using 2D water');
+    try { const lc = gl.getExtension('WEBGL_lose_context'); if (lc) lc.loseContext(); } catch (err) { /* ignore */ }
+    return null;
+  }
+  createWaterRenderer.reason = ''; createWaterRenderer.renderer = renderer;
 
   /* ------------------------------------------------------------------ */
   /* Shaders                                                             */
@@ -1333,6 +1357,7 @@ void main() {
   /* ------------------------------------------------------------------ */
   const api = {
     lost: false,
+    renderer,
 
     resize(w, h, pixelRatio) {
       cssW = Math.max(1, +w || 1);
@@ -2855,13 +2880,24 @@ function biomeMix(course, x) {
 const cvW = $('cvWater'), cv = $('cvScene');
 const ctx = cv.getContext('2d');
 let water = null;
-try { water = typeof createWaterRenderer === 'function' ? createWaterRenderer(cvW) : null; } catch (e) { console.warn('water renderer failed', e); water = null; }
+// ?nogl in the address forces the 2D water (testing / very old GPUs)
+const forceNoGL = /[?&]nogl(&|=|$)/.test(location.search);
+try { water = typeof createWaterRenderer === 'function' && !forceNoGL ? createWaterRenderer(cvW) : null; } catch (e) { console.warn('water renderer failed', e); water = null; }
+// GPU name for the FPS meter, and whether the browser draws without a graphics card at all
+const gpuRaw = typeof createWaterRenderer === 'function' ? createWaterRenderer.renderer || '' : '';
+const softwareGL = typeof createWaterRenderer === 'function' && createWaterRenderer.reason === 'software';
+const gpuName = (() => {
+  if (softwareGL) return 'bez GPU';
+  if (!gpuRaw) return water ? 'GPU' : 'bez WebGL';
+  const m = gpuRaw.match(/ANGLE \([^,]*,\s*([^(,]+)/);   // "ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 (0x…) Direct3D11…)"
+  return (m ? m[1] : gpuRaw).replace(/\b(NVIDIA|AMD|ATI|Intel\(R\)|Intel|Apple|Corporation)\s+/g, '').replace(/\((TM|R)\)/g, '').trim().slice(0, 26) || 'GPU';
+})();
 // The water canvas is composited into the scene canvas every frame, so it stays invisible itself.
 cvW.style.visibility = 'hidden';
 const lightCv = document.createElement('canvas'), lctx = lightCv.getContext('2d');
 const vigCv = document.createElement('canvas');
 const V = { w: 1, h: 1, dpr: 1, s: 1, visW: 1, visH: 1, boatOff: 140, camX: 0, camY: 0, q: 2, sx: 0, sy: 0 };
-let qualityLevel = S.quality === 'low' ? 0 : S.quality === 'medium' ? 1 : 2;
+let qualityLevel = S.quality === 'low' ? 0 : S.quality === 'medium' ? 1 : S.quality === 'high' ? 2 : softwareGL ? 0 : 2;   // no GPU: start at the cheapest level
 
 // Max render height per setting; 'auto' follows the quality governor (720p → 600p → 480p when slow).
 const RES_STEPS = ['auto', '480', '540', '720', '900', '1080'];
@@ -4850,9 +4886,9 @@ function showBanner(title, sub, ms, prio = 0) {
   bannerTimer = setTimeout(() => b.classList.remove('show'), ms || 1400);
 }
 let toastTimer = 0;
-function toast(msg) {
+function toast(msg, ms = 2400) {
   const t = $('toast'); t.textContent = msg; t.classList.add('show');
-  clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('show'), 2400);
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('show'), ms);
 }
 function escapeHtml(s) { return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
 
@@ -5147,17 +5183,18 @@ function perfMonitor(dtMs, now) {
 
 // ─── FPS meter ─────────────────────────────────────────────────────────────
 const fpsEl = $('fpsMeter');
-const fpsM = { n: 0, sum: 0, max: 0, at: 0 };
-function applyFps() { fpsEl.classList.toggle('hidden', !S.fps); fpsM.n = fpsM.sum = fpsM.max = 0; fpsM.at = performance.now(); }
+const fpsM = { n: 0, sum: 0, max: 0, at: 0, js: 0 };
+function applyFps() { fpsEl.classList.toggle('hidden', !S.fps); fpsM.n = fpsM.sum = fpsM.max = fpsM.js = 0; fpsM.at = performance.now(); }
 function fpsMeter(now, ms) {
   if (!S.fps) return;
-  if (ms > 0 && ms < 1000) { fpsM.n++; fpsM.sum += ms; if (ms > fpsM.max) fpsM.max = ms; }
+  if (ms > 0 && ms < 1000) { fpsM.n++; fpsM.sum += ms; fpsM.js += lastFrameMs; if (ms > fpsM.max) fpsM.max = ms; }
   if (now - fpsM.at < 500 || !fpsM.n) return;
   const fps = 1000 * fpsM.n / fpsM.sum;
-  fpsEl.textContent = `${Math.round(fps)} FPS · max ${Math.round(fpsM.max)} ms · ${cv.width}×${cv.height}`;
+  // JS = our own script time per frame; if FPS is low while JS is small, the browser's drawing (GPU) is the bottleneck
+  fpsEl.textContent = `${Math.round(fps)} FPS · max ${Math.round(fpsM.max)} ms · JS ${(fpsM.js / fpsM.n).toFixed(1)} ms · ${cv.width}×${cv.height} · ${gpuName}`;
   fpsEl.classList.toggle('warn', fps < 50 || fpsM.max > 40);
   fpsEl.classList.toggle('bad', fps < 30 || fpsM.max > 100);
-  fpsM.n = fpsM.sum = fpsM.max = 0; fpsM.at = now;
+  fpsM.n = fpsM.sum = fpsM.max = fpsM.js = 0; fpsM.at = now;
 }
 applyFps();
 
@@ -5200,6 +5237,7 @@ layout();
 refreshMenu();
 showScreen('scrMenu');
 if (!water) document.body.classList.add('no-webgl');
+if (softwareGL) setTimeout(() => toast('Prohlížeč kreslí bez grafické karty, hra proto poběží pomaleji. Zapni v jeho nastavení hardwarovou akceleraci.', 7000), 900);
 // challenge link?
 const hashCode = (location.hash || '').match(/PRJ1-[A-Za-z0-9_-]+/);
 if (hashCode) openChallengeScreen(hashCode[0], null);
