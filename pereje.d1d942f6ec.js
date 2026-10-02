@@ -418,6 +418,55 @@ class Sim {
   }
 }
 
+// ─── Free ride: held up / down paddling ───────────────────────────────────
+// Input state per tick: bit 0 = paddle up, bit 1 = paddle down, bit 2 = power (sprint).
+const RIDE_UP = 1, RIDE_DOWN = 2, RIDE_POWER = 4, RIDE_MASK = 7;
+//__RIDE_PHYSICS_BEGIN__
+class RideSim extends Sim {
+  constructor(course) {
+    super(course);
+    this.energy = 1; this.tempo = 0; this.dir = 0; this.phase = 0; this.power = 0;
+  }
+  clone() { const s = super.clone(); return s; }
+  step(inp) {
+    if (!this.alive) return;
+    const c = this.c;
+    if (this.x + 3200 > c.genX) c.ensure(this.x + 4200);
+    this.px = this.x; this.py = this.y; this.pvy = this.vy;
+    const lv = c.lv;
+    const cur = c.currentAt(this.x);
+    if (cur !== this.cur) { this.cur = cur; this.events.push({ type: 'flip', cur }); }
+    const flow = c.flowAt(this.x);
+    const dir = (inp & RIDE_UP ? -1 : 0) + (inp & RIDE_DOWN ? 1 : 0);
+    // placeholder model: steer towards a target vertical speed, the current pushes a little
+    const target = dir * lv.stroke * 0.7;
+    this.vy += (target - this.vy) * 6 * DT;
+    this.vy += flow * lv.pull * 0.25 * DT;
+    if (dir !== 0) { this.phase += DT * 2.4; if (this.phase >= 1) { this.phase -= 1; this.strokes++; this.events.push({ type: 'stroke', n: this.strokes, dir }); } }
+    this.dir = dir;
+    if (this.vy > lv.maxDrift) this.vy = lv.maxDrift; else if (this.vy < -lv.maxDrift) this.vy = -lv.maxDrift;
+    this.vx = c.speedAt(this.x);
+    this.x += this.vx * DT;
+    this.y += this.vy * DT;
+    this.tick++;
+    this._collide();
+    if (this.alive) this._progress();
+  }
+}
+//__RIDE_PHYSICS_END__
+
+// Replay a free-ride run headlessly; inputs = [[tick, state], …] (state holds until the next change)
+function runRide(seed, inputs, maxTicks = TICK_RATE * 60 * 45, level = 1) {
+  const sim = new RideSim(new Course(seed, level));
+  let ii = 0, st = 0;
+  while (sim.alive && sim.tick < maxTicks) {
+    while (ii < inputs.length && inputs[ii][0] <= sim.tick) st = inputs[ii++][1] & RIDE_MASK;
+    sim.step(st);
+    sim.events.length = 0;
+  }
+  return sim;
+}
+
 // Run a replay headlessly. Returns the finished sim.
 function runReplay(seed, taps, maxTicks = TICK_RATE * 60 * 45, level = 1) {
   const sim = new Sim(new Course(seed, level));
@@ -433,6 +482,8 @@ function runReplay(seed, taps, maxTicks = TICK_RATE * 60 * 45, level = 1) {
 
 // ─── Challenge codes: seed + run replay, checksummed, base64url ────────────
 const CODE_PREFIX = 'PRJ1-';
+// control schemes: classic tap strokes, or free ride (held up/down paddling)
+const CTRL = { tap: 0, ride: 1 };
 const MODES = { free: 0, daily: 1, river: 2 };
 const _td = new TextDecoder();
 function b64uEnc(bytes) {
@@ -459,20 +510,31 @@ const RULES = 2;
 const MAX_RUN_TICKS = TICK_RATE * 60 * 120;   // 2 h — anything longer is not a real run
 const cleanText = (s, n) => Array.from(String(s || '').replace(/[\u0000-\u001f\u007f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, '').normalize('NFC')).slice(0, n).join('');
 const Replay = {
-  // r: { mode, seed, score, endTick, name, label, taps (strictly increasing), pauses }
+  // r: { mode, level, ctrl, seed, score, endTick, name, label, pauses,
+  //      taps (classic: strictly increasing ticks) | inputs (ride: [[tick, state], …], ticks increasing) }
   encode(r) {
     const w = [];
     const vu = v => { v = Math.max(0, Math.floor(v)); while (v >= 128) { w.push((v & 127) | 128); v = Math.floor(v / 128); } w.push(v); };
     const str = (s, max) => { const b = _te.encode(cleanText(s, max)); vu(b.length); for (const x of b) w.push(x); };
-    w.push(3, RULES, r.mode & 255, levelOf(r.level).id);
+    const ride = r.ctrl === CTRL.ride;
+    w.push(ride ? 4 : 3, RULES, r.mode & 255, levelOf(r.level).id);
+    if (ride) w.push(CTRL.ride);
     const sd = r.seed >>> 0; w.push(sd & 255, (sd >>> 8) & 255, (sd >>> 16) & 255, sd >>> 24);
     vu(r.score); vu(r.endTick); vu(r.pauses | 0);
     str(r.name, 16); str(r.label, 32);
-    vu(r.taps.length);
     let prev = -1;
-    for (const t of r.taps) {
-      if (!(t > prev)) throw new Error('taps must be strictly increasing');
-      vu(t - prev - 1); prev = t;
+    if (ride) {
+      vu(r.inputs.length);
+      for (const [t, st] of r.inputs) {
+        if (!(t > prev)) throw new Error('input changes must be strictly increasing');
+        vu(t - prev - 1); w.push(st & 255); prev = t;
+      }
+    } else {
+      vu(r.taps.length);
+      for (const t of r.taps) {
+        if (!(t > prev)) throw new Error('taps must be strictly increasing');
+        vu(t - prev - 1); prev = t;
+      }
     }
     const h = fnvBytes(w, w.length);
     w.push(h & 255, (h >>> 8) & 255, (h >>> 16) & 255, h >>> 24);
@@ -495,12 +557,14 @@ const Replay = {
     const vu = () => { let v = 0, mul = 1; for (let i = 0; i < 6; i++) { const x = u8(); v += (x & 127) * mul; if (!(x & 128)) return v; mul *= 128; } throw bad(); };
     const str = n => { const l = vu(); if (l > 200) throw bad(); need(l); const s = _td.decode(b.subarray(p, p + l)); p += l; return cleanText(s, n); };
     const ver = u8();
-    if (ver < 1 || ver > 3) throw new Error('Kód je z novější verze hry.');
+    if (ver < 1 || ver > 4) throw new Error('Kód je z novější verze hry.');
     const rules = ver === 1 ? 1 : u8();
     if (rules !== RULES) throw new Error('Kód je ze starší verze pravidel hry — přehrát ho nejde.');
     const mode = u8();
     const level = ver >= 3 ? u8() : 1;
     if (level > 2) throw bad();
+    const ctrl = ver >= 4 ? u8() : CTRL.tap;
+    if (ctrl > CTRL.ride) throw new Error('Kód je z novější verze hry.');
     need(4);
     const seed = (b[p] | (b[p + 1] << 8) | (b[p + 2] << 16) | (b[p + 3] << 24)) >>> 0; p += 4;
     const score = vu(), endTick = vu();
@@ -508,15 +572,21 @@ const Replay = {
     const name = str(16), label = str(32);
     const n = vu();
     if (endTick < 1 || endTick > MAX_RUN_TICKS || n > endTick) throw bad();
-    const taps = new Array(n);
     let prev = -1;
+    if (ctrl === CTRL.ride) {
+      const inputs = new Array(n);
+      for (let i = 0; i < n; i++) { prev = prev + 1 + vu(); inputs[i] = [prev, u8() & RIDE_MASK]; }
+      if (n && prev >= endTick) throw bad();
+      return { mode, level, ctrl, seed, score, endTick, name, label, taps: [], inputs, pauses, rules };
+    }
+    const taps = new Array(n);
     for (let i = 0; i < n; i++) { prev = prev + 1 + vu(); taps[i] = prev; }
     if (n && taps[n - 1] >= endTick) throw bad();
-    return { mode, level, seed, score, endTick, name, label, taps, pauses, rules };
+    return { mode, level, ctrl, seed, score, endTick, name, label, taps, pauses, rules };
   },
   // A genuine run dies exactly at endTick with exactly the claimed score.
   verify(r) {
-    const sim = runReplay(r.seed, r.taps, r.endTick, r.level);
+    const sim = r.ctrl === CTRL.ride ? runRide(r.seed, r.inputs, r.endTick, r.level) : runReplay(r.seed, r.taps, r.endTick, r.level);
     return { ok: !sim.alive && sim.score === r.score && sim.deathTick === r.endTick, score: sim.score, endTick: sim.deathTick, sim };
   },
 };
@@ -2775,26 +2845,27 @@ const Store = {
   },
 };
 const reducedMotion = (() => { try { return matchMedia('(prefers-reduced-motion: reduce)').matches; } catch { return false; } })();
-const DEFAULTS = { name: '', sfx: 0.8, music: 0.5, amb: 0.7, ghosts: true, shake: !reducedMotion, haptics: true, hitbox: false, quality: 'auto', res: 'auto', frame: isNative ? 'full' : '1280', fps: false, tutorial: true, level: 1 };
+const DEFAULTS = { name: '', sfx: 0.8, music: 0.5, amb: 0.7, ghosts: true, shake: !reducedMotion, haptics: true, hitbox: false, quality: 'auto', res: 'auto', frame: isNative ? 'full' : '1280', fps: false, water3d: false, tutorial: true, level: 1 };
 const S = Object.assign({}, DEFAULTS, Store.get('settings', {}));
 const saveSettings = () => Store.set('settings', S);
 // Records are kept per difficulty level: a kids' score never competes with a pro's.
 const blankLevelRec = () => ({ free: { best: 0 }, seeds: {}, daily: {}, rivers: {} });
-const REC = Object.assign({ L: [], challenges: [], stats: { runs: 0, gates: 0, stars: 0, strokes: 0, dist: 0, time: 0 } }, Store.get('records2', {}));
-for (let i = 0; i < 3; i++) REC.L[i] = Object.assign(blankLevelRec(), REC.L[i] || {});
+const REC = Object.assign({ L: [], R: [], challenges: [], stats: { runs: 0, gates: 0, stars: 0, strokes: 0, dist: 0, time: 0 } }, Store.get('records2', {}));
+for (let i = 0; i < 3; i++) { REC.L[i] = Object.assign(blankLevelRec(), REC.L[i] || {}); REC.R[i] = Object.assign(blankLevelRec(), REC.R[i] || {}); }
 // Old (rules v1) records cannot be verified under the new physics; only the lifetime stats carry over.
 if (!Store.get('records2', null)) { const old = Store.get('records', null); if (old && old.stats) Object.assign(REC.stats, old.stats); }
-const LR = lv => REC.L[lv === 0 || lv === 2 ? lv : 1];
+// records per level and control scheme (classic taps / free ride)
+const LR = (lv, ctrl) => (ctrl === CTRL.ride ? REC.R : REC.L)[lv === 0 || lv === 2 ? lv : 1];
 const levelName = lv => levelOf(lv).name;
 const seedHex = s => (s >>> 0).toString(16).padStart(8, '0');
 const saveRecords = () => {
   // Keep storage bounded, but never evict a best run that another table points to.
   if (REC.challenges.length > 40) REC.challenges.length = 40;
-  REC.L.forEach((T, lv) => {
+  [...REC.L.map((T, lv) => [T, lv, CTRL.tap]), ...REC.R.map((T, lv) => [T, lv, CTRL.ride])].forEach(([T, lv, ctrl]) => {
     const keep = new Set([
       ...Object.keys(T.rivers).map(n => seedHex(riverSeed(n))),
       ...Object.keys(T.daily).sort().slice(-14).map(k => seedHex(dailySeed(k))),
-      ...REC.challenges.filter(h => (h.level ?? 1) === lv).map(h => h.seed),
+      ...REC.challenges.filter(h => (h.level ?? 1) === lv && (h.ctrl | 0) === ctrl).map(h => h.seed),
     ]);
     const ev = Object.keys(T.seeds).filter(k => !keep.has(k));
     if (ev.length > 60) ev.sort((a, b) => (T.seeds[a].at || 0) - (T.seeds[b].at || 0)).slice(0, ev.length - 60).forEach(k => delete T.seeds[k]);
@@ -2882,13 +2953,13 @@ const ctx = cv.getContext('2d');
 let water = null;
 // ?nogl in the address forces the 2D water (testing / very old GPUs)
 const forceNoGL = /[?&]nogl(&|=|$)/.test(location.search);
-try { water = typeof createWaterRenderer === 'function' && !forceNoGL ? createWaterRenderer(cvW) : null; } catch (e) { console.warn('water renderer failed', e); water = null; }
+try { water = typeof createWaterRenderer === 'function' && !forceNoGL && S.water3d ? createWaterRenderer(cvW) : null; } catch (e) { console.warn('water renderer failed', e); water = null; }
 // GPU name for the FPS meter, and whether the browser draws without a graphics card at all
 const gpuRaw = typeof createWaterRenderer === 'function' ? createWaterRenderer.renderer || '' : '';
 const softwareGL = typeof createWaterRenderer === 'function' && createWaterRenderer.reason === 'software';
 const gpuName = (() => {
   if (softwareGL) return 'bez GPU';
-  if (!gpuRaw) return water ? 'GPU' : 'bez WebGL';
+  if (!gpuRaw) return water ? 'GPU' : '';
   const m = gpuRaw.match(/ANGLE \([^,]*,\s*([^(,]+)/);   // "ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 (0x…) Direct3D11…)"
   return (m ? m[1] : gpuRaw).replace(/\b(NVIDIA|AMD|ATI|Intel\(R\)|Intel|Apple|Corporation)\s+/g, '').replace(/\((TM|R)\)/g, '').trim().slice(0, 26) || 'GPU';
 })();
@@ -4514,15 +4585,16 @@ function prepareRun(opt) {
   // opt: { mode, seed, label, challenge, level }
   G.mode = opt.mode; G.seed = opt.seed >>> 0; G.label = opt.label; G.challenge = opt.challenge || null;
   G.level = levelOf(G.challenge ? G.challenge.level : opt.level ?? S.level).id;
+  G.ctrl = (G.challenge ? G.challenge.ctrl : opt.ctrl) === CTRL.ride ? CTRL.ride : CTRL.tap;
   G.course = new Course(G.seed, G.level);
-  G.sim = new Sim(G.course);
-  G.taps = []; G.inputQ = []; G.pad = null; G.streak = 0; G.death = null; G.recordFlag = false;
+  G.sim = G.ctrl === CTRL.ride ? new RideSim(G.course) : new Sim(G.course);
+  G.taps = []; G.inputQ = []; G.inputs = []; G.rideQ = []; G.rideSt = 0; G.pad = null; G.streak = 0; G.death = null; G.recordFlag = false;
   G.flipWarned = -1; G.pauses = 0; G.resumeAt = 0; G.pauseAlpha = 1;
   G.ghosts = [];
   ghostTrails.clear();
-  const own = LR(G.level).seeds[seedHex(G.seed)];
-  if (G.challenge) G.ghosts.push(makeGhost(G.challenge.name || 'Soupeř', G.challenge.taps, 'ghost', G.challenge.score));
-  if (own && own.code) { try { const r = Replay.decode(own.code); if (r.seed === G.seed && r.level === G.level) G.ghosts.push(makeGhost('Tvůj rekord', r.taps, 'pb', r.score)); } catch { /* other rules version */ } }
+  const own = LR(G.level, G.ctrl).seeds[seedHex(G.seed)];
+  if (G.challenge) G.ghosts.push(makeGhost(G.challenge.name || 'Soupeř', G.challenge, 'ghost', G.challenge.score));
+  if (own && own.code) { try { const r = Replay.decode(own.code); if (r.seed === G.seed && r.level === G.level && (r.ctrl | 0) === G.ctrl) G.ghosts.push(makeGhost('Tvůj rekord', r, 'pb', r.score)); } catch { /* other rules version */ } }
   G.bestBefore = bestFor(G.mode, G.seed);
   trail.length = 0; parts.length = 0; ripples.length = 0;
   G.curBiome = 0;
@@ -4537,17 +4609,22 @@ function prepareRun(opt) {
   setHud(true);
   $('tapHint').classList.remove('hidden', 'playing');
   $('tapHint').classList.toggle('first', !!S.tutorial);
+  $('tapHint').classList.toggle('ride', G.ctrl === CTRL.ride);
+  document.body.classList.toggle('ride', G.ctrl === CTRL.ride);
+  clearHeld();
   A.setPaused(false);
   A.setMusicState('play');
   blurActive();
 }
 
-function makeGhost(name, taps, style, finalScore) {
-  return { name, taps, ti: 0, sim: new Sim(G.course), style, pad: null, finalScore };
+// rec: a decoded run ({ ctrl, taps } or { ctrl, inputs })
+function makeGhost(name, rec, style, finalScore) {
+  const ride = (rec.ctrl | 0) === CTRL.ride;
+  return { name, ride, taps: rec.taps || [], inputs: rec.inputs || [], ti: 0, ii: 0, st: 0, sim: ride ? new RideSim(G.course) : new Sim(G.course), style, pad: null, finalScore };
 }
 
 function bestFor(mode, seed) {
-  const T = LR(G.level);
+  const T = LR(G.level, G.ctrl);
   if (mode === 'free' && !G.challenge) return Math.max(T.free.best || 0, 0);
   const r = T.seeds[seedHex(seed)];
   let best = r ? r.best : 0;
@@ -4560,7 +4637,8 @@ function beginPlay(ts) {
   G.state = 'play';
   G.t0 = ts;
   if (S.tutorial) $('tapHint').classList.add('playing'); else $('tapHint').classList.add('hidden');
-  queueTap(ts);
+  if (G.ctrl === CTRL.ride) G.rideQ.push([0, rideState()]);
+  else queueTap(ts);
 }
 
 function queueTap(ts) {
@@ -4580,21 +4658,31 @@ function updatePlay(now) {
     G.t0 += shift * TICK_MS; target = sim.tick + 18;
     let last = -1;
     G.inputQ = G.inputQ.map(t => Math.max(sim.tick, t - shift)).filter(t => (t > last ? ((last = t), true) : false));
+    for (const q of G.rideQ) q[0] = Math.max(sim.tick, q[0] - shift);
   }
+  const ride = G.ctrl === CTRL.ride;
   while (sim.alive && sim.tick < target) {
     let tap = false;
-    while (G.inputQ.length && G.inputQ[0] <= sim.tick) { G.inputQ.shift(); tap = true; }
-    if (tap) G.taps.push(sim.tick);
+    if (ride) {
+      // held input: the newest state queued for this tick holds until the next change
+      let st = G.rideSt;
+      while (G.rideQ.length && G.rideQ[0][0] <= sim.tick) st = G.rideQ.shift()[1];
+      if (st !== G.rideSt || !G.inputs.length) { G.rideSt = st; if (!G.inputs.length || G.inputs[G.inputs.length - 1][1] !== st) G.inputs.push([sim.tick, st]); }
+    } else {
+      while (G.inputQ.length && G.inputQ[0] <= sim.tick) { G.inputQ.shift(); tap = true; }
+      if (tap) G.taps.push(sim.tick);
+    }
     const tickNow = sim.tick;
     for (const gh of G.ghosts) {
       if (!gh.sim.alive) continue;
       let gt = false;
-      while (gh.ti < gh.taps.length && gh.taps[gh.ti] <= tickNow) { if (gh.taps[gh.ti] === tickNow) gt = true; gh.ti++; }
+      if (gh.ride) { while (gh.ii < gh.inputs.length && gh.inputs[gh.ii][0] <= tickNow) gh.st = gh.inputs[gh.ii++][1]; gt = gh.st; }
+      else while (gh.ti < gh.taps.length && gh.taps[gh.ti] <= tickNow) { if (gh.taps[gh.ti] === tickNow) gt = true; gh.ti++; }
       gh.sim.step(gt);
       for (const ev of gh.sim.events) if (ev.type === 'stroke') gh.pad = { side: gh.pad && gh.pad.side ? -gh.pad.side : 1, t: VT };
       gh.sim.events.length = 0;
     }
-    sim.step(tap);
+    sim.step(ride ? G.rideSt : tap);
     for (const ev of sim.events) handleEvent(ev, sim, false);
     sim.events.length = 0;
   }
@@ -4646,17 +4734,17 @@ function onPlayerCrash(sim, ev) {
 }
 
 function encodeRun(run) {
-  try { return Replay.encode({ mode: typeof run.mode === 'string' ? (MODES[run.mode] || 0) : run.mode, level: run.level, seed: run.seed, score: run.score, endTick: run.endTick, name: run.name, label: run.label, taps: run.taps, pauses: run.pauses }); }
+  try { return Replay.encode({ mode: typeof run.mode === 'string' ? (MODES[run.mode] || 0) : run.mode, level: run.level, ctrl: run.ctrl | 0, seed: run.seed, score: run.score, endTick: run.endTick, name: run.name, label: run.label, taps: run.taps || [], inputs: run.inputs || [], pauses: run.pauses }); }
   catch (e) { console.warn(e); return ''; }
 }
 
 function finishRun() {
   const sim = G.sim;
-  const run = { mode: G.mode, level: G.level, seed: G.seed, score: sim.score, endTick: sim.deathTick, name: playerName(), label: G.label, taps: G.taps.slice(), pauses: G.pauses | 0 };
+  const run = { mode: G.mode, level: G.level, ctrl: G.ctrl, seed: G.seed, score: sim.score, endTick: sim.deathTick, name: playerName(), label: G.label, taps: G.taps.slice(), inputs: G.inputs.filter(i => i[0] < sim.deathTick), pauses: G.pauses | 0 };
   const code = encodeRun(run);
   run.code = code;
   G.lastRun = run;
-  const hex = seedHex(G.seed), T = LR(G.level);
+  const hex = seedHex(G.seed), T = LR(G.level, G.ctrl);
   const prev = T.seeds[hex];
   G.newBest = false;
   // random free rivers are only worth remembering when something was achieved on them
@@ -4672,7 +4760,7 @@ function finishRun() {
     const ch = G.challenge;
     const key = ch.code;
     let h = REC.challenges.find(x => x.code === key);
-    if (!h) { h = { from: ch.name, label: ch.label, level: G.level, their: ch.score, mine: 0, verified: ch.verified, code: key, seed: hex, at: Date.now(), tries: 0 }; REC.challenges.unshift(h); }
+    if (!h) { h = { from: ch.name, label: ch.label, level: G.level, ctrl: G.ctrl, their: ch.score, mine: 0, verified: ch.verified, code: key, seed: hex, at: Date.now(), tries: 0 }; REC.challenges.unshift(h); }
     h.tries++; h.mine = Math.max(h.mine, sim.score); h.at = Date.now();
   }
   saveRecords();
@@ -4723,8 +4811,8 @@ function pickCrashTitle(cause) {
 }
 
 function restart(sameSeed) {
-  if (G.mode === 'free' && !sameSeed && !G.challenge) prepareRun({ mode: 'free', seed: newRandomSeed(), label: 'Volná plavba', level: G.level });
-  else prepareRun({ mode: G.mode, seed: G.seed, label: G.label, challenge: G.challenge, level: G.level });
+  if (G.mode === 'free' && !sameSeed && !G.challenge) prepareRun({ mode: 'free', seed: newRandomSeed(), label: G.label, level: G.level, ctrl: G.ctrl });
+  else prepareRun({ mode: G.mode, seed: G.seed, label: G.label, challenge: G.challenge, level: G.level, ctrl: G.ctrl });
 }
 
 function pause() {
@@ -4761,6 +4849,7 @@ function finishResume() {
   G.resumeAt = 0; G.lastCount = 0;
   G.state = G.prevState;
   if (G.state === 'play') G.t0 += performance.now() - G.pauseAt;
+  if (G.ctrl === CTRL.ride) rideInput(performance.now());
   if (wasCounting) A.countdown(0);
   A.setPaused(false);
 }
@@ -4784,6 +4873,51 @@ function goMenu() {
 function clearHash() { if (location.hash) { try { history.replaceState(null, '', location.pathname + location.search); } catch { /* file:// in some browsers */ } } }
 
 // ─── Input ─────────────────────────────────────────────────────────────────
+// Free ride: every device adds or removes a "source" for a direction; the state is the union,
+// so two keys or a key + mouse button never fight and nothing gets stuck.
+const held = { up: new Set(), down: new Set(), power: new Set() };
+const rideState = () => (held.up.size ? RIDE_UP : 0) | (held.down.size ? RIDE_DOWN : 0) | (held.power.size ? RIDE_POWER : 0);
+const rideActive = () => G.ctrl === CTRL.ride && (G.state === 'play' || G.state === 'ready');
+function setHeld(kind, src, on, ts) {
+  const set = held[kind];
+  if (on === set.has(src)) return;
+  if (on) set.add(src); else set.delete(src);
+  rideInput(ts);
+}
+function clearHeld() { held.up.clear(); held.down.clear(); held.power.clear(); }
+function rideInput(ts) {
+  if (G.ctrl !== CTRL.ride || !G.sim) return;
+  const now = performance.now();
+  if (!(ts > 0) || Math.abs(ts - now) > 1000) ts = now;
+  const st = rideState();
+  if (G.state === 'ready') { if (st & (RIDE_UP | RIDE_DOWN)) { unlockAudio(); beginPlay(ts); } return; }
+  if (G.state !== 'play') return;
+  let tick = Math.ceil((ts - G.t0) / TICK_MS - 1e-6);
+  if (tick < G.sim.tick) tick = G.sim.tick;
+  const q = G.rideQ;
+  if (q.length && q[q.length - 1][0] >= tick) q[q.length - 1][1] = st; else q.push([tick, st]);
+}
+function ridePointer(e) {
+  if (!rideActive()) return;
+  if (e.pointerType === 'mouse') {
+    // read the whole button mask: a second button pressed while one is held only fires pointermove
+    const b = e.buttons | 0;
+    setHeld('up', 'mL', !!(b & 1), e.timeStamp); setHeld('down', 'mR', !!(b & 2), e.timeStamp); setHeld('power', 'mM', !!(b & 4), e.timeStamp);
+    return;
+  }
+  const id = 'p' + e.pointerId;
+  if (e.type === 'pointerup' || e.type === 'pointercancel') { setHeld('up', id, false, e.timeStamp); setHeld('down', id, false, e.timeStamp); return; }
+  if (e.type === 'pointermove' && !held.up.has(id) && !held.down.has(id)) return;
+  // touch / pen: upper half of the game = paddle up, lower half = down (sliding the finger switches)
+  const r = stageEl.getBoundingClientRect(), upper = e.clientY < r.top + r.height / 2;
+  setHeld('up', id, upper, e.timeStamp); setHeld('down', id, !upper, e.timeStamp);
+}
+for (const el of [cv, $('tapLayer')]) el.addEventListener('pointerdown', e => { if (!rideActive()) return; e.preventDefault(); try { el.setPointerCapture(e.pointerId); } catch { /* ignore */ } ridePointer(e); }, { passive: false });
+for (const t of ['pointermove', 'pointerup', 'pointercancel']) window.addEventListener(t, ridePointer);
+const RIDE_KEYS = { ArrowUp: 'up', KeyW: 'up', ArrowDown: 'down', KeyS: 'down', Space: 'power', ShiftLeft: 'power', ShiftRight: 'power' };
+window.addEventListener('keyup', e => { const k = RIDE_KEYS[e.code]; if (k && G.ctrl === CTRL.ride) setHeld(k, 'k' + e.code, false, e.timeStamp); });
+window.addEventListener('blur', () => { clearHeld(); rideInput(); });
+
 function press(ts) {
   const now = performance.now();
   if (!(ts > 0) || Math.abs(ts - now) > 1000) ts = now;   // old WebViews report epoch timestamps
@@ -4792,11 +4926,12 @@ function press(ts) {
   if (G.state === 'play') queueTap(ts);
 }
 cv.addEventListener('pointerdown', e => {
+  if (rideActive()) return;
   if (e.button !== undefined && e.button > 0) return;
   e.preventDefault();
   press(e.timeStamp);
 }, { passive: false });
-$('tapLayer').addEventListener('pointerdown', e => { if (e.button > 0) return; e.preventDefault(); press(e.timeStamp); }, { passive: false });
+$('tapLayer').addEventListener('pointerdown', e => { if (rideActive() || e.button > 0) return; e.preventDefault(); press(e.timeStamp); }, { passive: false });
 document.addEventListener('contextmenu', e => { if (G.state === 'play' || G.state === 'ready') e.preventDefault(); });
 const TAP_KEYS = new Set(['Space', 'ArrowUp', 'KeyW', 'KeyJ', 'KeyK']);
 const overLocked = () => performance.now() - G.overAt < OVER_LOCK;
@@ -4818,6 +4953,7 @@ window.addEventListener('keydown', e => {
     if (e.repeat || overLocked()) { e.preventDefault(); return; }
     if (e.code === 'Space' || e.code === 'KeyR' || (e.code === 'Enter' && document.activeElement === document.body)) { e.preventDefault(); unlockAudio(); restart(false); return; }
   }
+  if (rideActive() && RIDE_KEYS[e.code]) { e.preventDefault(); if (!e.repeat) setHeld(RIDE_KEYS[e.code], 'k' + e.code, true, e.timeStamp); return; }
   if (TAP_KEYS.has(e.code) && (G.state === 'play' || G.state === 'ready')) { e.preventDefault(); if (!e.repeat) press(e.timeStamp); return; }
   if (TAP_KEYS.has(e.code) && G.state === 'paused' && G.resumeAt) { e.preventDefault(); return; }  // countdown running
   if (e.code === 'KeyH' && e.shiftKey) { S.hitbox = !S.hitbox; saveSettings(); }
@@ -4842,6 +4978,12 @@ function pollGamepads() {
     const edge = i => cur[i] && !prev[i];
     const now = performance.now();
     const ts = gp.timestamp > 0 && gp.timestamp <= now && now - gp.timestamp < 50 ? gp.timestamp : now;
+    if (rideActive()) {
+      const ay = gp.axes && gp.axes.length > 1 ? gp.axes[1] : 0, src = 'g' + gp.index;
+      setHeld('up', src, ay < -0.35 || !!cur[12], ts); setHeld('down', src, ay > 0.35 || !!cur[13], ts); setHeld('power', src, !!(cur[0] || cur[7]), ts);
+      if (edge(9)) pause();
+      continue;
+    }
     if ([0, 2, 3, 5, 7].some(edge)) {
       if (G.state === 'play' || G.state === 'ready') press(ts);
       else if (G.state === 'over' && currentScreen === 'scrOver' && !overLocked()) restart(false);
@@ -4903,6 +5045,8 @@ function syncLevelButtons() {
 function refreshMenu() {
   const T = LR(S.level);
   $('menuBestFree').textContent = T.free.best ? 'rekord ' + T.free.best : 'nová řeka pokaždé';
+  const TR = LR(S.level, CTRL.ride);
+  $('menuBestRide').textContent = TR.free.best ? 'rekord ' + TR.free.best : 'drž a pádluj';
   const dk = utcDayKey();
   $('menuBestDaily').textContent = T.daily[dk] ? 'dnes ' + T.daily[dk] : 'stejná řeka pro všechny';
   $('nameInput').value = S.name;
@@ -4950,15 +5094,15 @@ function loadChallenge(text) {
     const info = describeSeed(r);
     r.info = info;
     pendingChallenge = r;
-    const mine = LR(r.level).seeds[seedHex(r.seed)];
+    const mine = LR(r.level, r.ctrl | 0).seeds[seedHex(r.seed)];
     const pz = r.pauses > 0 ? ` · pauzy: ${r.pauses}` : r.pauses === 0 ? ' · bez pauzy' : '';
     box.innerHTML = `
       <div class="ch-head"><span class="avatar">${escapeHtml((r.name || '?').slice(0, 1).toUpperCase())}</span>
-      <div><b>${escapeHtml(r.name || 'Anonym')}</b><small>${escapeHtml(info.label)} · ${levelName(r.level)}</small></div>
+      <div><b>${escapeHtml(r.name || 'Anonym')}</b><small>${escapeHtml(info.label)} · ${levelName(r.level)}${r.ctrl === CTRL.ride ? ' · volná jízda' : ''}</small></div>
       <div class="ch-score">${r.score}<small>${pl(r.score, 'bod', 'body', 'bodů')}</small></div></div>
       <div class="ch-meta">${v.ok ? '<span class="ok">✓ Skóre ověřeno přehráním záznamu</span>' : `<span class="bad">⚠ Záznam dává ${bodu(v.score)}, ne ${r.claimed}. Hraje se proti skutečnému výsledku.</span>`}
       ${info.tag ? `<span class="${info.tag[0] === '✓' ? 'ok' : 'bad'}">${escapeHtml(info.tag)}</span>` : ''}
-      <span>Délka jízdy ${secs(r.endTick / TICK_RATE)} · ${r.taps.length} ${pl(r.taps.length, 'záběr', 'záběry', 'záběrů')}${pz}${mine ? ' · tvůj rekord zde: ' + mine.best : ''}</span></div>`;
+      <span>Délka jízdy ${secs(r.endTick / TICK_RATE)} · ${r.ctrl === CTRL.ride ? 'držené pádlování' : r.taps.length + ' ' + pl(r.taps.length, 'záběr', 'záběry', 'záběrů')}${pz}${mine ? ' · tvůj rekord zde: ' + mine.best : ''}</span></div>`;
     box.hidden = false;
     $('btnAccept').disabled = false;
     return true;
@@ -5025,11 +5169,13 @@ async function copyText(text) {
   toast('Schránka není dostupná — text je označený, zkopíruj ho ručně');
 }
 
+let recCtrl = CTRL.tap;   // which control scheme the records screen shows
 function renderRecords() {
   const dk = utcDayKey();
-  const st = REC.stats, T = LR(S.level);
+  const st = REC.stats, T = LR(S.level, recCtrl);
   const rows = [];
   const dailyHex = seedHex(dailySeed(dk));
+  rows.push(`<div class="levels ctrls" role="radiogroup" aria-label="Režim">${[[CTRL.tap, 'Plavba'], [CTRL.ride, 'Volná jízda']].map(([v, n]) => `<button class="lvl${v === recCtrl ? ' on' : ''}" role="radio" aria-checked="${v === recCtrl}" data-action="rec-ctrl" data-ctrl="${v}">${n}</button>`).join('')}</div>`);
   rows.push(`<div class="levels" role="radiogroup" aria-label="Obtížnost">${[0, 1, 2].map(i => `<button class="lvl${i === S.level ? ' on' : ''}" role="radio" aria-checked="${i === S.level}" data-action="set-level" data-level="${i}">${levelName(i)}</button>`).join('')}</div>`);
   rows.push(`<div class="rec-grid">
     <div><small>Volná plavba</small><b>${T.free.best || 0}</b>${T.free.code ? `<button class="mini" data-action="share-code" data-code="${T.free.code}">Vyzvat</button>` : ''}</div>
@@ -5041,7 +5187,7 @@ function renderRecords() {
   if (days.length) rows.push(`<h3>Denní výzvy</h3><ul class="rec-list">${days.map(d => `<li><span>${d.split('-').reverse().map(Number).join('. ')}</span><b>${T.daily[d]}</b></li>`).join('')}</ul>`);
   const rivers = Object.keys(T.rivers).slice(0, 12);
   if (rivers.length) rows.push(`<h3>Vlastní řeky</h3><ul class="rec-list">${rivers.map(n => `<li><span>${escapeHtml(n)}</span><b>${T.rivers[n]}</b>${T.seeds[seedHex(riverSeed(n))] ? `<button class="mini" data-action="share-seed" data-seed="${seedHex(riverSeed(n))}">Vyzvat</button>` : ''}</li>`).join('')}</ul>`);
-  if (REC.challenges.length) rows.push(`<h3>Výzvy od kamarádů</h3><ul class="rec-list">${REC.challenges.slice(0, 15).map(h => `<li class="${h.mine > h.their ? 'win' : h.mine === h.their ? 'draw' : 'lose'}"><span>${escapeHtml(h.from)} <small>${escapeHtml(h.label || '')} · ${levelName(h.level ?? 1)}${h.verified ? '' : ' · neověřeno'}</small></span><b>${h.mine} : ${h.their}</b><button class="mini" data-action="replay-challenge" data-code="${h.code}">Hrát</button></li>`).join('')}</ul>`);
+  if (REC.challenges.length) rows.push(`<h3>Výzvy od kamarádů</h3><ul class="rec-list">${REC.challenges.slice(0, 15).map(h => `<li class="${h.mine > h.their ? 'win' : h.mine === h.their ? 'draw' : 'lose'}"><span>${escapeHtml(h.from)} <small>${escapeHtml(h.label || '')} · ${levelName(h.level ?? 1)}${h.ctrl === CTRL.ride ? ' · volná jízda' : ''}${h.verified ? '' : ' · neověřeno'}</small></span><b>${h.mine} : ${h.their}</b><button class="mini" data-action="replay-challenge" data-code="${h.code}">Hrát</button></li>`).join('')}</ul>`);
   if (!days.length && !rivers.length && !REC.challenges.length && !st.runs) rows.push('<p class="muted">Zatím žádné jízdy. Hurá na vodu!</p>');
   $('recBody').innerHTML = rows.join('');
 }
@@ -5067,6 +5213,8 @@ document.addEventListener('click', e => {
   if (act !== 'back') A.ui('click');
   switch (act) {
     case 'play-free': prepareRun({ mode: 'free', seed: newRandomSeed(), label: 'Volná plavba' }); break;
+    case 'play-ride': prepareRun({ mode: 'free', seed: newRandomSeed(), label: 'Volná jízda', ctrl: CTRL.ride }); break;
+    case 'rec-ctrl': recCtrl = +btn.dataset.ctrl === CTRL.ride ? CTRL.ride : CTRL.tap; renderRecords(); break;
     case 'set-level': S.level = levelOf(+btn.dataset.level).id; saveSettings(); refreshMenu(); if (currentScreen === 'scrRecords') renderRecords(); break;
     case 'play-daily': startDaily(); break;
     case 'open-challenge': openChallengeScreen('', currentScreen === 'scrMenu' ? null : currentScreen); break;
@@ -5093,10 +5241,10 @@ document.addEventListener('click', e => {
     case 'copy-code': copyText($('shareCode').textContent); break;
     case 'native-share': Native.share($('shareText').value); break;
     case 'share-code': { try { const r = Replay.decode(btn.dataset.code); openShare(Object.assign(r, { code: btn.dataset.code })); } catch (err) { toast(err.message || 'Záznam je poškozený'); } break; }
-    case 'share-seed': { const rec = LR(S.level).seeds[btn.dataset.seed]; if (rec && rec.code) { try { const r = Replay.decode(rec.code); openShare(Object.assign(r, { code: rec.code })); } catch (err) { toast(err.message || 'Záznam je poškozený'); } } else toast('Na této řece zatím nemáš jízdu'); break; }
+    case 'share-seed': { const rec = LR(S.level, recCtrl).seeds[btn.dataset.seed]; if (rec && rec.code) { try { const r = Replay.decode(rec.code); openShare(Object.assign(r, { code: rec.code })); } catch (err) { toast(err.message || 'Záznam je poškozený'); } } else toast('Na této řece zatím nemáš jízdu'); break; }
     case 'replay-challenge': openChallengeScreen(btn.dataset.code, 'scrRecords'); break;
     case 'reset-records':
-      if (confirm('Opravdu smazat všechny rekordy a historii výzev?')) { for (const k of Object.keys(REC)) delete REC[k]; Object.assign(REC, { L: [blankLevelRec(), blankLevelRec(), blankLevelRec()], challenges: [], stats: { runs: 0, gates: 0, stars: 0, strokes: 0, dist: 0, time: 0 } }); saveRecords(); renderRecords(); toast('Rekordy smazány'); }
+      if (confirm('Opravdu smazat všechny rekordy a historii výzev?')) { for (const k of Object.keys(REC)) delete REC[k]; Object.assign(REC, { L: [blankLevelRec(), blankLevelRec(), blankLevelRec()], R: [blankLevelRec(), blankLevelRec(), blankLevelRec()], challenges: [], stats: { runs: 0, gates: 0, stars: 0, strokes: 0, dist: 0, time: 0 } }); saveRecords(); renderRecords(); toast('Rekordy smazány'); }
       break;
   }
 });
@@ -5124,7 +5272,7 @@ function syncSettingsUI() {
   $('setSfx').value = S.sfx; $('setMusic').value = S.music; $('setAmb').value = S.amb;
   $('setGhosts').checked = S.ghosts; $('setShake').checked = S.shake; $('setHaptics').checked = S.haptics; $('setHitbox').checked = S.hitbox;
   $('setQuality').value = S.quality; $('setRes').value = RES_STEPS.includes(S.res) ? S.res : 'auto'; $('setName').value = S.name;
-  $('setFrame').value = FRAMES[S.frame] ? S.frame : 'full'; $('setFps').checked = S.fps;
+  $('setFrame').value = FRAMES[S.frame] ? S.frame : 'full'; $('setFps').checked = S.fps; $('setWater').checked = !!water;
 }
 ['setSfx', 'setMusic', 'setAmb'].forEach(id => $(id).addEventListener('input', e => {
   const k = { setSfx: 'sfx', setMusic: 'music', setAmb: 'amb' }[id];
@@ -5140,6 +5288,19 @@ $('setQuality').addEventListener('change', e => {
   layout();
 });
 $('setRes').addEventListener('change', e => { S.res = e.target.value; saveSettings(); layout(true); });
+// Efektní voda (WebGL): created on demand, released when switched off
+function setWater3d(on) {
+  if (on && !water && typeof createWaterRenderer === 'function') {
+    try { water = createWaterRenderer(cvW); } catch (e) { water = null; }
+    if (!water) {
+      toast(createWaterRenderer.reason === 'software' ? 'Prohlížeč kreslí bez grafické karty — efektní voda by sekala.' : 'Tenhle prohlížeč efektní vodu (WebGL2) neumí.', 4000);
+      S.water3d = false; saveSettings(); $('setWater').checked = false;
+    }
+  } else if (!on && water) { try { water.dispose(); } catch (e) { /* ignore */ } water = null; }
+  document.body.classList.toggle('no-webgl', !water);
+  layout(true);
+}
+$('setWater').addEventListener('change', e => { S.water3d = e.target.checked; saveSettings(); A.ui('toggle'); setWater3d(S.water3d); });
 $('setFrame').addEventListener('change', e => { S.frame = e.target.value; saveSettings(); layout(true); });
 $('setFps').addEventListener('change', e => { S.fps = e.target.checked; saveSettings(); A.ui('toggle'); applyFps(); });
 $('setName').addEventListener('input', e => { S.name = e.target.value.slice(0, 16); saveSettings(); $('nameInput').value = S.name; });
@@ -5191,7 +5352,8 @@ function fpsMeter(now, ms) {
   if (now - fpsM.at < 500 || !fpsM.n) return;
   const fps = 1000 * fpsM.n / fpsM.sum;
   // JS = our own script time per frame; if FPS is low while JS is small, the browser's drawing (GPU) is the bottleneck
-  fpsEl.textContent = `${Math.round(fps)} FPS · max ${Math.round(fpsM.max)} ms · JS ${(fpsM.js / fpsM.n).toFixed(1)} ms · ${cv.width}×${cv.height} · ${gpuName}`;
+  const wl = water ? 'voda WebGL' + (gpuName ? ' · ' + gpuName : '') : softwareGL ? 'bez GPU' : 'voda 2D';
+  fpsEl.textContent = `${Math.round(fps)} FPS · max ${Math.round(fpsM.max)} ms · JS ${(fpsM.js / fpsM.n).toFixed(1)} ms · ${cv.width}×${cv.height} · ${wl}`;
   fpsEl.classList.toggle('warn', fps < 50 || fpsM.max > 40);
   fpsEl.classList.toggle('bad', fps < 30 || fpsM.max > 100);
   fpsM.n = fpsM.sum = fpsM.max = fpsM.js = 0; fpsM.at = now;

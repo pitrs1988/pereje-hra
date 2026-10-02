@@ -8,7 +8,7 @@
 <meta name="description" content="PEŘEJE — říční výzva. Pádluj loďkou mezi skalami, kládami a pilíři mostů, sbírej hvězdy a vyzvi přátele na stejnou řeku.">
 <title>PEŘEJE — říční výzva</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230d3a4a'/%3E%3Cpath d='M6 40c8-6 16 6 26 0s18 6 26 0' stroke='%235fd4ff' stroke-width='5' fill='none' stroke-linecap='round'/%3E%3Cpath d='M14 30c6-6 30-6 36 0c-6 5-30 5-36 0z' fill='%23ff6a3d'/%3E%3Ccircle cx='31' cy='29' r='4' fill='%232f7fd6'/%3E%3C/svg%3E">
-<link rel="stylesheet" href="pereje.a25d80cda5.css">
+<link rel="stylesheet" href="pereje.35667eb098.css">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="icon-180.png">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -18,6 +18,7 @@
 </head>
 <body>
 <svg class="sprite" width="0" height="0" aria-hidden="true">
+  <symbol id="i-ride" viewBox="0 0 24 24"><path d="M12 3v18M12 3l-4 4M12 3l4 4M12 21l-4-4M12 21l4-4" stroke="currentColor" stroke-width="2.2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></symbol>
   <symbol id="i-play" viewBox="0 0 24 24"><path d="M8 5.5v13a1 1 0 0 0 1.5.86l10.5-6.5a1 1 0 0 0 0-1.72L9.5 4.64A1 1 0 0 0 8 5.5z" fill="currentColor"/></symbol>
   <symbol id="i-cal" viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="15.5" rx="3" fill="none" stroke="currentColor" stroke-width="2"/><path d="M3.5 10h17M8 3v4M16 3v4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="12" cy="15" r="2" fill="currentColor"/></symbol>
   <symbol id="i-duel" viewBox="0 0 24 24"><path d="M4 20 18 6M6 4l-2 2 3 3M20 20 6 6M18 4l2 2-3 3" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/><ellipse cx="19" cy="5" rx="2.3" ry="1.2" transform="rotate(-45 19 5)" fill="currentColor"/><ellipse cx="5" cy="5" rx="2.3" ry="1.2" transform="rotate(45 5 5)" fill="currentColor"/></symbol>
@@ -56,9 +57,12 @@
 
 <div id="tapHint" class="hidden">
   <div class="hand"><span class="ring"></span><span class="ring r2"></span><svg viewBox="0 0 24 24"><path d="M9 11V5.5a1.5 1.5 0 0 1 3 0V10m0-.5V8a1.5 1.5 0 0 1 3 0v2m0-.5a1.5 1.5 0 0 1 3 0V14a6 6 0 0 1-6 6h-1.2a5 5 0 0 1-4.1-2.2L4.2 14a1.5 1.5 0 0 1 2.3-1.9L9 14.5" fill="#fff" stroke="#0b2530" stroke-width="1.3" stroke-linejoin="round"/></svg></div>
-  <b>Ťukni, klikni nebo stiskni mezerník</b>
-  <span class="t1">Každý záběr pádlem tě odtlačí <em>proti proudu</em>.</span>
-  <span class="t2">Proud tě táhne ke břehu — šipky u loďky ukazují kam. Proplouvej mezerami, sbírej <i class="star">★</i>.</span>
+  <b class="tap-only">Ťukni, klikni nebo stiskni mezerník</b>
+  <span class="t1 tap-only">Každý záběr pádlem tě odtlačí <em>proti proudu</em>.</span>
+  <span class="t2 tap-only">Proud tě táhne ke břehu — šipky u loďky ukazují kam. Proplouvej mezerami, sbírej <i class="star">★</i>.</span>
+  <b class="ride-only">Drž levé tlačítko = nahoru, pravé = dolů</b>
+  <span class="t1 ride-only">Klávesy <kbd>↑</kbd>/<kbd>W</kbd> a <kbd>↓</kbd>/<kbd>S</kbd>, na telefonu drž horní nebo dolní polovinu.</span>
+  <span class="t2 ride-only">Pádluješ, dokud držíš — hlídej si sílu a tempo.</span>
 </div>
 
 <!-- ═════ MENU ═════ -->
@@ -76,6 +80,7 @@
       </div>
       <p class="level-info"></p>
       <button class="btn primary" data-action="play-free" data-autofocus><svg><use href="#i-play"/></svg><span>Plout</span><small id="menuBestFree"></small></button>
+      <button class="btn ride" data-action="play-ride" hidden><svg><use href="#i-ride"/></svg><span>Volná jízda</span><small id="menuBestRide"></small></button>
       <button class="btn" data-action="play-daily"><svg><use href="#i-cal"/></svg><span>Denní výzva</span><small id="menuBestDaily"></small></button>
       <button class="btn" data-action="open-challenge"><svg><use href="#i-duel"/></svg><span>Výzva od kamaráda / vlastní řeka</span></button>
       <div class="row3">
@@ -182,6 +187,7 @@
     <label class="set"><span>Zvuky řeky</span><input id="setAmb" type="range" min="0" max="1" step="0.05"></label>
     <label class="set"><span>Kvalita grafiky</span>
       <select id="setQuality"><option value="auto">Automaticky</option><option value="high">Vysoká</option><option value="medium">Střední</option><option value="low">Nízká</option></select></label>
+    <label class="set toggle"><span>Efektní voda <small>(WebGL — hezčí, ale náročnější)</small></span><input id="setWater" type="checkbox"><i></i></label>
     <label class="set"><span>Max. rozlišení <small id="resInfo"></small></span>
       <select id="setRes"><option value="auto">Automaticky (do 720p)</option><option value="480">480p – nejrychlejší</option><option value="540">540p</option><option value="720">720p</option><option value="900">900p</option><option value="1080">1080p – nejostřejší</option></select></label>
     <label class="set web-only"><span>Velikost hry</span>
@@ -224,6 +230,6 @@
 </div>
 <noscript><p class="noscript">Hra potřebuje JavaScript.</p></noscript>
 
-<script src="pereje.fda027e90d.js"></script>
+<script src="pereje.d1d942f6ec.js"></script>
 </body>
 </html>

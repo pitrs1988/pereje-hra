@@ -330,3 +330,9 @@ kbd { font: 600 11.5px var(--font); padding: 2px 7px; border-radius: 6px; backgr
    re-blur per frame (and on Macs keeps the page off the cheap overlay path) — use a solid tint instead */
 body.playing .chip, body.playing .iconbtn, body.playing .race { backdrop-filter: none; -webkit-backdrop-filter: none; background: rgba(5, 25, 34, .72); }
 #hudScore, #banner { will-change: transform, opacity; }
+
+/* free ride */
+#tapHint:not(.ride) .ride-only, #tapHint.ride .tap-only { display: none; }
+.btn.ride { border-color: rgba(120, 220, 255, .35); }
+.btn.ride svg { color: #8fe3ff; }
+.levels.ctrls { margin-bottom: 6px; }
