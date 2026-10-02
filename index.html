@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="cs">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" content="#0b2530">
+<meta name="color-scheme" content="dark">
+<meta name="description" content="PEŘEJE — říční výzva. Pádluj loďkou mezi skalami, kládami a pilíři mostů, sbírej hvězdy a vyzvi přátele na stejnou řeku.">
+<title>PEŘEJE — říční výzva</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230d3a4a'/%3E%3Cpath d='M6 40c8-6 16 6 26 0s18 6 26 0' stroke='%235fd4ff' stroke-width='5' fill='none' stroke-linecap='round'/%3E%3Cpath d='M14 30c6-6 30-6 36 0c-6 5-30 5-36 0z' fill='%23ff6a3d'/%3E%3Ccircle cx='31' cy='29' r='4' fill='%232f7fd6'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="pereje.1243c30db7.css">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-180.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="PEŘEJE">
+</head>
+<body>
+<svg class="sprite" width="0" height="0" aria-hidden="true">
+  <symbol id="i-play" viewBox="0 0 24 24"><path d="M8 5.5v13a1 1 0 0 0 1.5.86l10.5-6.5a1 1 0 0 0 0-1.72L9.5 4.64A1 1 0 0 0 8 5.5z" fill="currentColor"/></symbol>
+  <symbol id="i-cal" viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="15.5" rx="3" fill="none" stroke="currentColor" stroke-width="2"/><path d="M3.5 10h17M8 3v4M16 3v4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="12" cy="15" r="2" fill="currentColor"/></symbol>
+  <symbol id="i-duel" viewBox="0 0 24 24"><path d="M4 20 18 6M6 4l-2 2 3 3M20 20 6 6M18 4l2 2-3 3" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/><ellipse cx="19" cy="5" rx="2.3" ry="1.2" transform="rotate(-45 19 5)" fill="currentColor"/><ellipse cx="5" cy="5" rx="2.3" ry="1.2" transform="rotate(45 5 5)" fill="currentColor"/></symbol>
+  <symbol id="i-trophy" viewBox="0 0 24 24"><path d="M7 4h10v4a5 5 0 0 1-10 0V4zM7 6H4v1.5A3.5 3.5 0 0 0 7.5 11M17 6h3v1.5A3.5 3.5 0 0 1 16.5 11M12 13v4M8.5 20h7M10 17h4" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.2" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M5.3 18.7l2.1-2.1M16.6 7.4l2.1-2.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+  <symbol id="i-help" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2"/><path d="M9.5 9.5a2.6 2.6 0 1 1 3.6 2.4c-.7.3-1.1.9-1.1 1.6v.5" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/><circle cx="12" cy="17" r="1.2" fill="currentColor"/></symbol>
+  <symbol id="i-pause" viewBox="0 0 24 24"><rect x="6.5" y="5" width="4" height="14" rx="1.4" fill="currentColor"/><rect x="13.5" y="5" width="4" height="14" rx="1.4" fill="currentColor"/></symbol>
+  <symbol id="i-retry" viewBox="0 0 24 24"><path d="M4.5 12a7.5 7.5 0 1 0 2.4-5.5M4.5 4v4.5H9" stroke="currentColor" stroke-width="2.2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-same" viewBox="0 0 24 24"><path d="M3 15c3-3 6 3 9 0s6 3 9 0M3 9c3-3 6 3 9 0s6 3 9 0" stroke="currentColor" stroke-width="2.2" fill="none" stroke-linecap="round"/></symbol>
+  <symbol id="i-share" viewBox="0 0 24 24"><circle cx="18" cy="5.5" r="2.5" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="6" cy="12" r="2.5" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="18" cy="18.5" r="2.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="m8.2 10.8 7.6-4.1M8.2 13.2l7.6 4.1" stroke="currentColor" stroke-width="2"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M16 8V6.5A2.5 2.5 0 0 0 13.5 4h-7A2.5 2.5 0 0 0 4 6.5v7A2.5 2.5 0 0 0 6.5 16H8" fill="none" stroke="currentColor" stroke-width="2"/></symbol>
+  <symbol id="i-home" viewBox="0 0 24 24"><path d="M4 11 12 4l8 7v8.5a1 1 0 0 1-1 1h-4.5V15h-5v5.5H5a1 1 0 0 1-1-1V11z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></symbol>
+  <symbol id="i-back" viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7" stroke="currentColor" stroke-width="2.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-paste" viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="16" rx="2.5" fill="none" stroke="currentColor" stroke-width="2"/><rect x="9" y="3" width="6" height="4" rx="1.2" fill="currentColor"/></symbol>
+  <symbol id="i-star" viewBox="0 0 24 24"><path d="m12 2.8 2.7 5.9 6.4.7-4.8 4.3 1.4 6.3L12 16.8 6.3 20l1.4-6.3-4.8-4.3 6.4-.7z" fill="currentColor"/></symbol>
+</svg>
+
+<canvas id="cvWater" aria-hidden="true"></canvas>
+<canvas id="cvScene" role="img" aria-label="Herní plocha — řeka"></canvas>
+<div id="tapLayer" class="hidden" aria-hidden="true"></div>
+
+<div id="hud" class="hidden">
+  <div class="hud-left">
+    <div id="hudMode" class="chip"></div>
+    <div id="hudBest" class="sub"></div>
+  </div>
+  <div id="hudScore">0</div>
+  <div class="hud-right">
+    <button id="btnPause" class="iconbtn" data-action="pause" aria-label="Pauza (Esc)"><svg><use href="#i-pause"/></svg></button>
+    <div id="hudRace"></div>
+  </div>
+</div>
+
+<div id="banner" aria-live="polite"><b></b><span></span></div>
+
+<div id="tapHint" class="hidden">
+  <div class="hand"><span class="ring"></span><span class="ring r2"></span><svg viewBox="0 0 24 24"><path d="M9 11V5.5a1.5 1.5 0 0 1 3 0V10m0-.5V8a1.5 1.5 0 0 1 3 0v2m0-.5a1.5 1.5 0 0 1 3 0V14a6 6 0 0 1-6 6h-1.2a5 5 0 0 1-4.1-2.2L4.2 14a1.5 1.5 0 0 1 2.3-1.9L9 14.5" fill="#fff" stroke="#0b2530" stroke-width="1.3" stroke-linejoin="round"/></svg></div>
+  <b>Ťukni, klikni nebo stiskni mezerník</b>
+  <span class="t1">Každý záběr pádlem tě odtlačí <em>proti proudu</em>.</span>
+  <span class="t2">Proud tě táhne ke břehu — šipky u loďky ukazují kam. Proplouvej mezerami, sbírej <i class="star">★</i>.</span>
+</div>
+
+<!-- ═════ MENU ═════ -->
+<section id="scrMenu" class="screen menu show" role="dialog" aria-modal="true" aria-label="Hlavní menu">
+  <div class="menu-wrap">
+    <header class="logo">
+      <h1>PEŘEJE</h1>
+      <p>Pádluj. Uhýbej. Vyzvi přátele.</p>
+    </header>
+    <div class="card">
+      <div class="levels" role="radiogroup" aria-label="Obtížnost">
+        <button class="lvl" role="radio" data-action="set-level" data-level="0">🐣 Děti</button>
+        <button class="lvl" role="radio" data-action="set-level" data-level="1">🛶 Normální</button>
+        <button class="lvl" role="radio" data-action="set-level" data-level="2">🔥 Profi vodák</button>
+      </div>
+      <p class="level-info"></p>
+      <button class="btn primary" data-action="play-free" data-autofocus><svg><use href="#i-play"/></svg><span>Plout</span><small id="menuBestFree"></small></button>
+      <button class="btn" data-action="play-daily"><svg><use href="#i-cal"/></svg><span>Denní výzva</span><small id="menuBestDaily"></small></button>
+      <button class="btn" data-action="open-challenge"><svg><use href="#i-duel"/></svg><span>Výzva od kamaráda / vlastní řeka</span></button>
+      <div class="row3">
+        <button class="btn small" data-action="open-records"><svg><use href="#i-trophy"/></svg><span>Rekordy</span></button>
+        <button class="btn small" data-action="open-settings"><svg><use href="#i-gear"/></svg><span>Nastavení</span></button>
+        <button class="btn small" data-action="open-help"><svg><use href="#i-help"/></svg><span>Jak hrát</span></button>
+      </div>
+      <label class="name"><span>Kapitán</span><input id="nameInput" maxlength="16" placeholder="tvoje jméno do výzev" autocomplete="nickname" spellcheck="false"></label>
+    </div>
+    <p class="keys"><kbd>Mezerník</kbd> / <kbd>klik</kbd> / <kbd>ťuk</kbd> záběr pádlem · <kbd>Esc</kbd> pauza · gamepad <kbd>A</kbd></p>
+  </div>
+</section>
+
+<!-- ═════ GAME OVER ═════ -->
+<section id="scrOver" class="screen" role="dialog" aria-modal="true" aria-labelledby="ovTitle">
+  <div class="card over">
+    <h2 id="ovTitle" aria-live="polite">Ztroskotání!</h2>
+    <div class="bigscore"><span id="ovScore">0</span><small id="ovLabel"></small></div>
+    <div class="stats">
+      <div><small>Branky</small><b id="ovGates">0</b></div>
+      <div><small><i class="star">★</i> Hvězdy</small><b id="ovStars">0</b></div>
+      <div><small>Vzdálenost</small><b id="ovDist">0 m</b></div>
+      <div><small>Čas</small><b id="ovTime">0 s</b></div>
+    </div>
+    <p id="ovBest" class="muted center"></p>
+    <div id="ovChallenge" class="result" hidden></div>
+    <div class="grid2">
+      <button id="btnRetry" class="btn primary" data-action="retry" data-autofocus><svg><use href="#i-retry"/></svg><span>Znovu</span></button>
+      <button id="btnSame" class="btn" data-action="retry-same"><svg><use href="#i-same"/></svg><span>Stejná řeka</span></button>
+      <button class="btn accent" data-action="share"><svg><use href="#i-share"/></svg><span>Vyzvat kamarády</span></button>
+      <button class="btn" data-action="menu"><svg><use href="#i-home"/></svg><span>Menu</span></button>
+    </div>
+    <p id="ovHint" class="hint center"></p>
+  </div>
+</section>
+
+<!-- ═════ PAUSE ═════ -->
+<section id="scrPause" class="screen" role="dialog" aria-modal="true" aria-labelledby="tPause">
+  <div class="card narrow">
+    <h2 id="tPause">Pauza</h2>
+    <button class="btn primary" data-action="resume" data-autofocus><svg><use href="#i-play"/></svg><span>Pokračovat</span><small class="kbd-only">Esc</small></button>
+    <button class="btn" data-action="retry-pause"><svg><use href="#i-retry"/></svg><span>Začít znovu</span><small>stejná řeka</small></button>
+    <button class="btn" data-action="open-settings"><svg><use href="#i-gear"/></svg><span>Nastavení</span></button>
+    <button class="btn" data-action="menu"><svg><use href="#i-home"/></svg><span>Do menu</span></button>
+  </div>
+</section>
+
+<!-- ═════ CHALLENGE ═════ -->
+<section id="scrChallenge" class="screen" role="dialog" aria-modal="true" aria-labelledby="tChallenge">
+  <div class="card wide">
+    <div class="titlebar"><button class="iconbtn" data-action="back" aria-label="Zpět"><svg><use href="#i-back"/></svg></button><h2 id="tChallenge">Výzvy</h2></div>
+    <h3>Přijmout výzvu</h3>
+    <p class="muted">Vlož kód nebo celou zprávu od kamaráda. Hra jeho jízdu přehraje, ověří skóre a pošle s tebou jeho ducha na stejnou řeku.</p>
+    <textarea id="chInput" rows="3" placeholder="PRJ1-…" spellcheck="false"></textarea>
+    <div class="grid2">
+      <button class="btn" data-action="paste-code"><svg><use href="#i-paste"/></svg><span>Vložit ze schránky</span></button>
+      <button class="btn" data-action="load-code"><svg><use href="#i-duel"/></svg><span>Načíst kód</span></button>
+    </div>
+    <div id="chPreview" class="ch-preview" hidden></div>
+    <button id="btnAccept" class="btn primary" data-action="accept-challenge" disabled><svg><use href="#i-play"/></svg><span>Přijmout výzvu</span></button>
+    <hr>
+    <h3>Vlastní řeka</h3>
+    <p class="muted">Stejný název = stejná řeka pro každého. Domluvte se třeba na „VLTAVA“ a porovnejte skóre.</p>
+    <div class="inline">
+      <input id="riverInput" maxlength="24" placeholder="Název řeky" spellcheck="false" autocomplete="off">
+      <button class="btn primary fit" data-action="play-river"><svg><use href="#i-play"/></svg><span>Plout</span></button>
+    </div>
+  </div>
+</section>
+
+<!-- ═════ SHARE ═════ -->
+<section id="scrShare" class="screen" role="dialog" aria-modal="true" aria-labelledby="tShare">
+  <div class="card wide">
+    <div class="titlebar"><button class="iconbtn" data-action="back" aria-label="Zpět"><svg><use href="#i-back"/></svg></button><h2 id="tShare">Vyzvat kamarády</h2></div>
+    <p id="shareSummary" class="muted"></p>
+    <label class="name"><span>Tvoje jméno</span><input id="shareName" maxlength="16" placeholder="podpis výzvy" autocomplete="nickname" spellcheck="false"></label>
+    <p class="muted">Pošli zprávu kamarádům. Po vložení kódu dostanou stejnou řeku a uvidí tvoji loďku jako ducha. Skóre se ověřuje přehráním záznamu — vymyšlené skóre neprojde. Počet pauz je v kódu vidět.</p>
+    <textarea id="shareText" rows="4" readonly></textarea>
+    <div class="code" id="shareCode"></div>
+    <div class="grid2">
+      <button class="btn primary" data-action="copy-msg" data-autofocus><svg><use href="#i-copy"/></svg><span>Kopírovat zprávu</span></button>
+      <button class="btn" data-action="copy-code"><svg><use href="#i-copy"/></svg><span>Jen kód</span></button>
+      <button id="btnNativeShare" class="btn" data-action="native-share"><svg><use href="#i-share"/></svg><span>Sdílet…</span></button>
+    </div>
+  </div>
+</section>
+
+<!-- ═════ RECORDS ═════ -->
+<section id="scrRecords" class="screen" role="dialog" aria-modal="true" aria-labelledby="tRecords">
+  <div class="card wide">
+    <div class="titlebar"><button class="iconbtn" data-action="back" aria-label="Zpět"><svg><use href="#i-back"/></svg></button><h2 id="tRecords">Rekordy</h2></div>
+    <div id="recBody"></div>
+    <button class="btn danger small" data-action="reset-records"><span>Smazat rekordy</span></button>
+  </div>
+</section>
+
+<!-- ═════ SETTINGS ═════ -->
+<section id="scrSettings" class="screen" role="dialog" aria-modal="true" aria-labelledby="tSettings">
+  <div class="card">
+    <div class="titlebar"><button class="iconbtn" data-action="back" aria-label="Zpět"><svg><use href="#i-back"/></svg></button><h2 id="tSettings">Nastavení</h2></div>
+    <label class="set"><span>Jméno kapitána</span><input id="setName" maxlength="16" spellcheck="false"></label>
+    <label class="set"><span>Zvukové efekty</span><input id="setSfx" type="range" min="0" max="1" step="0.05"></label>
+    <label class="set"><span>Hudba</span><input id="setMusic" type="range" min="0" max="1" step="0.05"></label>
+    <label class="set"><span>Zvuky řeky</span><input id="setAmb" type="range" min="0" max="1" step="0.05"></label>
+    <label class="set"><span>Kvalita grafiky</span>
+      <select id="setQuality"><option value="auto">Automaticky</option><option value="high">Vysoká</option><option value="medium">Střední</option><option value="low">Nízká</option></select></label>
+    <label class="set toggle"><span>Duchové soupeřů a rekordu</span><input id="setGhosts" type="checkbox"><i></i></label>
+    <label class="set toggle"><span>Otřesy obrazovky</span><input id="setShake" type="checkbox"><i></i></label>
+    <label class="set toggle"><span>Vibrace</span><input id="setHaptics" type="checkbox"><i></i></label>
+    <label class="set toggle"><span>Zobrazit hitboxy <small>(Shift+H)</small></span><input id="setHitbox" type="checkbox"><i></i></label>
+  </div>
+</section>
+
+<!-- ═════ HELP ═════ -->
+<section id="scrHelp" class="screen" role="dialog" aria-modal="true" aria-labelledby="tHelp">
+  <div class="card wide">
+    <div class="titlebar"><button class="iconbtn" data-action="back" aria-label="Zpět"><svg><use href="#i-back"/></svg></button><h2 id="tHelp">Jak hrát</h2></div>
+    <ul class="help">
+      <li><b>Záběr pádlem</b> — ťuknutí, klik, mezerník (nebo ↑ / W) či tlačítko A na gamepadu. Záběr míří <b>vždy proti proudu</b> — v protiproudu tedy loďku pošle dolů.</li>
+      <li><b>Proud</b> tě neustále táhne k jednomu břehu. Šipky u loďky ukazují směr. Dotek břehu nebo překážky = ztroskotání.</li>
+      <li><b>Protiproud</b> — později se proud obrací. Před zlomem přijde varování a pás <em>klidné vody</em>: proud v něm slábne, loďka se sama srovná a záběry jsou jemnější. Za ním už táhne na druhou stranu.</li>
+      <li><b>Obtížnost</b> — <b>Děti</b>: pomalejší řeka, široké mezery, bez protiproudu. <b>Normální</b>: klasické peřeje. <b>Profi vodák</b>: rychlá a těsná voda. Rekordy i výzvy se počítají zvlášť pro každou obtížnost; výzva od kamaráda se vždy jede na jeho obtížnost.</li>
+      <li><b>Body</b> — každá proplutá branka +1, každá <i class="star">★</i> hvězda +1. Hvězdy bývají na odvážných místech.</li>
+      <li><b>Překážky</b>: skály, klády, plovoucí zátarasy s bójkami (pohybují se), mosty se dvěma průjezdy.</li>
+      <li><b>Krajiny</b> se střídají každých 20 branek: les za svítání, kaňon, džungle, noční les a ledovec. Rychlost postupně roste.</li>
+    </ul>
+    <h3>Férové výzvy</h3>
+    <ul class="help">
+      <li>Řeka je dána <b>semínkem</b> — stejný kód nebo název = přesně stejná trať pro všechny.</li>
+      <li>Simulace běží v pevném kroku 120× za sekundu a nezávisí na snímkové frekvenci ani na zařízení.</li>
+      <li>Každý hráč vidí stejný kus řeky dopředu (60 m) — širší monitor nedává výhodu, dál je mlha.</li>
+      <li>Kód výzvy obsahuje celý záznam jízdy. Hra ho při načtení přehraje a <b>ověří skóre</b>. Kód nese i počet pauz — férová jízda je bez pauzy.</li>
+      <li><b>Denní výzva</b> je každý den nová a stejná pro celý svět (podle UTC).</li>
+    </ul>
+  </div>
+</section>
+
+<div id="toast" role="status"></div>
+<div id="fade"></div>
+<noscript><p class="noscript">Hra potřebuje JavaScript.</p></noscript>
+
+<script src="pereje.6282bc1868.js"></script>
+</body>
+</html>
