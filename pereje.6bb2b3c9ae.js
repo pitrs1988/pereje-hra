@@ -2744,7 +2744,7 @@ const Store = {
   },
 };
 const reducedMotion = (() => { try { return matchMedia('(prefers-reduced-motion: reduce)').matches; } catch { return false; } })();
-const DEFAULTS = { name: '', sfx: 0.8, music: 0.5, amb: 0.7, ghosts: true, shake: !reducedMotion, haptics: true, hitbox: false, quality: 'auto', tutorial: true, level: 1 };
+const DEFAULTS = { name: '', sfx: 0.8, music: 0.5, amb: 0.7, ghosts: true, shake: !reducedMotion, haptics: true, hitbox: false, quality: 'auto', res: 'auto', tutorial: true, level: 1 };
 const S = Object.assign({}, DEFAULTS, Store.get('settings', {}));
 const saveSettings = () => Store.set('settings', S);
 // Records are kept per difficulty level: a kids' score never competes with a pro's.
@@ -2857,18 +2857,23 @@ const vigCv = document.createElement('canvas');
 const V = { w: 1, h: 1, dpr: 1, s: 1, visW: 1, visH: 1, boatOff: 140, camX: 0, camY: 0, q: 2, sx: 0, sy: 0 };
 let qualityLevel = S.quality === 'low' ? 0 : S.quality === 'medium' ? 1 : 2;
 
+// Max render height per setting; 'auto' follows the quality governor (720p → 600p → 480p when slow).
+const RES_STEPS = ['auto', '480', '540', '720', '900', '1080'];
+const resCapHeight = () => S.res !== 'auto' && RES_STEPS.includes(S.res) ? +S.res : [480, 600, 720][qualityLevel];
+const resCapPixels = () => { const ch = resCapHeight(); return Math.round(ch * 16 / 9) * ch; };
 let layoutKey = '', viewKey = '';
 function layout(force) {
   const w = Math.max(1, window.innerWidth), h = Math.max(1, window.innerHeight);
   const maxDpr = qualityLevel === 2 ? 2 : qualityLevel === 1 ? 1.5 : 1;
-  // Pixel budget: a big or high-DPI fullscreen window renders at a capped internal resolution and the
-  // browser scales it up, so frame time stops growing with the monitor (about 1080p worth of pixels at most).
-  const BUDGET = [0.9e6, 1.5e6, 2.1e6][qualityLevel];
+  // Resolution cap: the scene is drawn at most this many pixels (720p by default) and the browser scales
+  // it up to the window, so frame time stays flat on a 1440p/4K monitor or a high-DPI phone.
+  const BUDGET = resCapPixels();
   let dpr = Math.min(window.devicePixelRatio || 1, maxDpr);
   if (w * h * dpr * dpr > BUDGET) dpr = Math.sqrt(BUDGET / (w * h));
-  const key = [w, h, dpr.toFixed(3), qualityLevel].join('|');
+  const key = [w, h, dpr.toFixed(3), qualityLevel, BUDGET].join('|');
   if (key === layoutKey && !force) return;
   layoutKey = key;
+  const ri = $('resInfo'); if (ri) ri.textContent = `teď ${Math.round(w * dpr)}×${Math.round(h * dpr)}`;
   V.w = w; V.h = h; V.dpr = dpr;
   V.s = Math.min(h / 700, w / 740);
   V.visW = w / V.s; V.visH = h / V.s;
@@ -2878,7 +2883,8 @@ function layout(force) {
   cv.style.width = w + 'px'; cv.style.height = h + 'px';
   if (water) {
     cvW.style.width = w + 'px'; cvW.style.height = h + 'px';
-    const wr = Math.min(Math.min(window.devicePixelRatio || 1, 1.5) * (qualityLevel === 2 ? 1 : qualityLevel === 1 ? 0.75 : 0.55), Math.sqrt(BUDGET * 0.6 / (w * h)));
+    // the water is soft and moving: ~75 % of the scene's linear resolution is indistinguishable
+    const wr = Math.min(Math.min(window.devicePixelRatio || 1, 1.5) * (qualityLevel === 2 ? 1 : qualityLevel === 1 ? 0.75 : 0.55), Math.sqrt(BUDGET * 0.56 / (w * h)));
     water.resize(w, h, wr);
   }
   const lq = Math.min(0.5, Math.sqrt(BUDGET * 0.2 / (w * h)));
@@ -4958,7 +4964,7 @@ window.addEventListener('hashchange', () => {
 function syncSettingsUI() {
   $('setSfx').value = S.sfx; $('setMusic').value = S.music; $('setAmb').value = S.amb;
   $('setGhosts').checked = S.ghosts; $('setShake').checked = S.shake; $('setHaptics').checked = S.haptics; $('setHitbox').checked = S.hitbox;
-  $('setQuality').value = S.quality; $('setName').value = S.name;
+  $('setQuality').value = S.quality; $('setRes').value = RES_STEPS.includes(S.res) ? S.res : 'auto'; $('setName').value = S.name;
 }
 ['setSfx', 'setMusic', 'setAmb'].forEach(id => $(id).addEventListener('input', e => {
   const k = { setSfx: 'sfx', setMusic: 'music', setAmb: 'amb' }[id];
@@ -4973,6 +4979,7 @@ $('setQuality').addEventListener('change', e => {
   qualityLevel = S.quality === 'low' ? 0 : S.quality === 'medium' ? 1 : 2; perf.locked = S.quality !== 'auto';
   layout();
 });
+$('setRes').addEventListener('change', e => { S.res = e.target.value; saveSettings(); layout(true); });
 $('setName').addEventListener('input', e => { S.name = e.target.value.slice(0, 16); saveSettings(); $('nameInput').value = S.name; });
 
 // ─── Performance governor ─────────────────────────────────────────────────
@@ -5079,5 +5086,5 @@ function initNative() {
 }
 
 // test hooks (harmless)
-window.__pereje = { G, V, S, REC, BIOMES, get water() { return water; }, layout, prepareRun, loadChallenge, showOver, Replay, tickFrame, perf };
+window.__pereje = { G, V, S, REC, resCapPixels, BIOMES, get water() { return water; }, layout, prepareRun, loadChallenge, showOver, Replay, tickFrame, perf };
 })();
