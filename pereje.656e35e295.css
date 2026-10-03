@@ -336,3 +336,26 @@ body.playing .chip, body.playing .iconbtn, body.playing .race { backdrop-filter:
 .btn.ride { border-color: rgba(120, 220, 255, .35); }
 .btn.ride svg { color: #8fe3ff; }
 .levels.ctrls { margin-bottom: 6px; }
+#hudRide { display: none; position: absolute; left: 50%; top: calc(10px + var(--safe-t) + clamp(50px, calc(8.6 * var(--vw, 1vw)), 82px)); transform: translateX(-50%);
+  flex-direction: column; align-items: center; gap: 5px; pointer-events: none; }
+body.ride.playing #hudRide { display: flex; }
+#hudMult { font: 800 clamp(17px, calc(2.6 * var(--vw, 1vw)), 24px)/1 var(--display); color: #fff; padding: 3px 10px; border-radius: 99px; background: rgba(5, 25, 34, .6);
+  text-shadow: 0 2px 0 rgba(0, 40, 55, .6); transition: color .2s, background .2s; }
+#hudMult.dim { opacity: .55; }
+#hudMult.amber { color: #ffd34d; }
+#hudMult.gold { color: #ffe9a8; background: rgba(120, 80, 10, .55); box-shadow: 0 0 18px rgba(255, 200, 80, .45); }
+#hudMult.pop { animation: pop .3s cubic-bezier(.2, .9, .3, 1.5); }
+#hudMeter { width: 120px; height: 4px; border-radius: 4px; background: rgba(255, 255, 255, .18); overflow: hidden; }
+#hudMeter i { display: block; height: 100%; background: linear-gradient(90deg, #8fe3ff, #ffd34d); transform-origin: left; transform: scaleX(0); transition: transform .15s; }
+.btn em.new { font: 800 10px/1 var(--font); font-style: normal; letter-spacing: .06em; color: #062430; background: #8fe3ff; padding: 3px 6px; border-radius: 99px; margin-left: 6px; vertical-align: 2px; }
+#hudMult.lost { color: #ff8f7a; animation: shake .45s; }
+@keyframes shake { 20% { transform: translateX(-4px); } 40% { transform: translateX(4px); } 60% { transform: translateX(-3px); } 80% { transform: translateX(2px); } }
+#ovTip { margin-top: -4px; font-size: 13px; }
+body:not(.coarse) .coarse-only, body.coarse .fine-only { display: none; }
+/* phones, free ride, before the start: the two halves of the screen */
+body.ride.coarse.rideReady #tapLayer::before, body.ride.coarse.rideReady #tapLayer::after {
+  position: absolute; left: 0; right: 0; height: 50%; display: grid; place-items: center; font: 800 40px/1 var(--font);
+  color: rgba(255, 255, 255, .5); pointer-events: none; animation: zone 1.6s ease-in-out infinite; }
+body.ride.coarse.rideReady #tapLayer::before { content: '▲'; top: 0; background: rgba(143, 227, 255, .06); border-bottom: 1px dashed rgba(255, 255, 255, .25); }
+body.ride.coarse.rideReady #tapLayer::after { content: '▼'; bottom: 0; background: rgba(255, 211, 77, .05); animation-delay: .8s; }
+@keyframes zone { 50% { opacity: .35; } }

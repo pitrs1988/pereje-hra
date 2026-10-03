@@ -8,7 +8,7 @@
 <meta name="description" content="PEŘEJE — říční výzva. Pádluj loďkou mezi skalami, kládami a pilíři mostů, sbírej hvězdy a vyzvi přátele na stejnou řeku.">
 <title>PEŘEJE — říční výzva</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230d3a4a'/%3E%3Cpath d='M6 40c8-6 16 6 26 0s18 6 26 0' stroke='%235fd4ff' stroke-width='5' fill='none' stroke-linecap='round'/%3E%3Cpath d='M14 30c6-6 30-6 36 0c-6 5-30 5-36 0z' fill='%23ff6a3d'/%3E%3Ccircle cx='31' cy='29' r='4' fill='%232f7fd6'/%3E%3C/svg%3E">
-<link rel="stylesheet" href="pereje.35667eb098.css">
+<link rel="stylesheet" href="pereje.656e35e295.css">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="icon-180.png">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -47,6 +47,7 @@
     <div id="hudBest" class="sub"></div>
   </div>
   <div id="hudScore">0</div>
+  <div id="hudRide"><div id="hudMult" class="dim">×1</div><div id="hudMeter"><i></i></div></div>
   <div class="hud-right">
     <button id="btnPause" class="iconbtn" data-action="pause" aria-label="Pauza (Esc)"><svg><use href="#i-pause"/></svg></button>
     <div id="hudRace"></div>
@@ -60,9 +61,10 @@
   <b class="tap-only">Ťukni, klikni nebo stiskni mezerník</b>
   <span class="t1 tap-only">Každý záběr pádlem tě odtlačí <em>proti proudu</em>.</span>
   <span class="t2 tap-only">Proud tě táhne ke břehu — šipky u loďky ukazují kam. Proplouvej mezerami, sbírej <i class="star">★</i>.</span>
-  <b class="ride-only">Drž levé tlačítko = nahoru, pravé = dolů</b>
-  <span class="t1 ride-only">Klávesy <kbd>↑</kbd>/<kbd>W</kbd> a <kbd>↓</kbd>/<kbd>S</kbd>, na telefonu drž horní nebo dolní polovinu.</span>
-  <span class="t2 ride-only">Pádluješ, dokud držíš — hlídej si sílu a tempo.</span>
+  <b class="ride-only fine-only">Drž levé tlačítko = nahoru, pravé = dolů</b>
+  <b class="ride-only coarse-only">Drž horní půlku = nahoru, dolní = dolů</b>
+  <span class="t1 ride-only"><span class="fine-only">Klávesy <kbd>↑</kbd>/<kbd>W</kbd> a <kbd>↓</kbd>/<kbd>S</kbd> · </span>Krátké ťuknutí = jemný záběr. Držením se rozjedeš.</span>
+  <span class="t2 ride-only">Pusť a nech loď klouzat — síla se vrátí. Neztrať sérii ×3!</span>
 </div>
 
 <!-- ═════ MENU ═════ -->
@@ -80,7 +82,7 @@
       </div>
       <p class="level-info"></p>
       <button class="btn primary" data-action="play-free" data-autofocus><svg><use href="#i-play"/></svg><span>Plout</span><small id="menuBestFree"></small></button>
-      <button class="btn ride" data-action="play-ride" hidden><svg><use href="#i-ride"/></svg><span>Volná jízda</span><small id="menuBestRide"></small></button>
+      <button class="btn ride" data-action="play-ride"><svg><use href="#i-ride"/></svg><span>Volná jízda <em class="new">NOVÉ</em></span><small id="menuBestRide"></small></button>
       <button class="btn" data-action="play-daily"><svg><use href="#i-cal"/></svg><span>Denní výzva</span><small id="menuBestDaily"></small></button>
       <button class="btn" data-action="open-challenge"><svg><use href="#i-duel"/></svg><span>Výzva od kamaráda / vlastní řeka</span></button>
       <div class="row3">
@@ -102,10 +104,11 @@
     <div class="stats">
       <div><small>Branky</small><b id="ovGates">0</b></div>
       <div><small><i class="star">★</i> Hvězdy</small><b id="ovStars">0</b></div>
-      <div><small>Vzdálenost</small><b id="ovDist">0 m</b></div>
-      <div><small>Čas</small><b id="ovTime">0 s</b></div>
+      <div><small id="ovL3">Vzdálenost</small><b id="ovDist">0 m</b></div>
+      <div><small id="ovL4">Čas</small><b id="ovTime">0 s</b></div>
     </div>
     <p id="ovBest" class="muted center"></p>
+    <p id="ovTip" class="muted center tip" hidden></p>
     <div id="ovChallenge" class="result" hidden></div>
     <div class="grid2">
       <button id="btnRetry" class="btn primary" data-action="retry" data-autofocus><svg><use href="#i-retry"/></svg><span>Znovu</span></button>
@@ -190,6 +193,8 @@
     <label class="set toggle"><span>Efektní voda <small>(WebGL — hezčí, ale náročnější)</small></span><input id="setWater" type="checkbox"><i></i></label>
     <label class="set"><span>Max. rozlišení <small id="resInfo"></small></span>
       <select id="setRes"><option value="auto">Automaticky (do 720p)</option><option value="480">480p – nejrychlejší</option><option value="540">540p</option><option value="720">720p</option><option value="900">900p</option><option value="1080">1080p – nejostřejší</option></select></label>
+    <label class="set"><span>Ukazatel doplutí <small>(Volná jízda: kam loď doklouže)</small></span>
+      <select id="setCoast"><option value="auto">Automaticky (mimo Profi)</option><option value="on">Zapnuto</option><option value="off">Vypnuto</option></select></label>
     <label class="set web-only"><span>Velikost hry</span>
       <select id="setFrame"><option value="960">Malé okno (960×540)</option><option value="1280">Okno (1280×720)</option><option value="1600">Velké okno (1600×900)</option><option value="full">Celá obrazovka</option></select></label>
     <label class="set toggle"><span>Duchové soupeřů a rekordu</span><input id="setGhosts" type="checkbox"><i></i></label>
@@ -209,6 +214,7 @@
       <li><b>Proud</b> tě neustále táhne k jednomu břehu. Šipky u loďky ukazují směr. Dotek břehu nebo překážky = ztroskotání.</li>
       <li><b>Protiproud</b> — později se proud obrací. Před zlomem přijde varování a pás <em>klidné vody</em>: proud v něm slábne, loďka se sama srovná a záběry jsou jemnější. Za ním už táhne na druhou stranu.</li>
       <li><b>Obtížnost</b> — <b>Děti</b>: pomalejší řeka, široké mezery, bez protiproudu. <b>Normální</b>: klasické peřeje. <b>Profi vodák</b>: rychlá a těsná voda. Rekordy i výzvy se počítají zvlášť pro každou obtížnost; výzva od kamaráda se vždy jede na jeho obtížnost.</li>
+      <li><b>Volná jízda</b> — drž levé tlačítko (<kbd>↑</kbd>/<kbd>W</kbd>) a pádluješ nahoru, pravé (<kbd>↓</kbd>/<kbd>S</kbd>) dolů; na telefonu drž horní nebo dolní půlku. Čím déle držíš, tím rychlejší tempo a silnější záběry — ale ubývá síla (proužek pod loďkou). Když pustíš, loď ještě klouže a síla se vrací (v klidné vodě rychleji, hvězdy a těsné průjezdy ji doplní). Opačným záběrem zabrzdíš. Branky bez vyčerpání budují sérii: ×2 po 5, FLOW ×3 po 15 — ve FLOW tě pádlování stojí jen polovinu síly. Když ti síla dojde, série spadne na ×1 a chvíli pádluješ slabě.</li>
       <li><b>Body</b> — každá proplutá branka +1, každá <i class="star">★</i> hvězda +1. Hvězdy bývají na odvážných místech.</li>
       <li><b>Překážky</b>: skály, klády, plovoucí zátarasy s bójkami (pohybují se), mosty se dvěma průjezdy.</li>
       <li><b>Krajiny</b> se střídají každých 20 branek: les za svítání, kaňon, džungle, noční les a ledovec. Rychlost postupně roste.</li>
@@ -230,6 +236,6 @@
 </div>
 <noscript><p class="noscript">Hra potřebuje JavaScript.</p></noscript>
 
-<script src="pereje.d1d942f6ec.js"></script>
+<script src="pereje.8e008ccebc.js"></script>
 </body>
 </html>

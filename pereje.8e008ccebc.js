@@ -326,7 +326,7 @@ class Sim {
     this.events = [];
   }
   clone() {
-    const s = Object.create(Sim.prototype);
+    const s = Object.create(Object.getPrototypeOf(this));   // keeps subclasses (RideSim) intact
     Object.assign(s, this);
     s.taken = this.taken.slice();
     s.events = [];
@@ -422,36 +422,133 @@ class Sim {
 // Input state per tick: bit 0 = paddle up, bit 1 = paddle down, bit 2 = power (sprint).
 const RIDE_UP = 1, RIDE_DOWN = 2, RIDE_POWER = 4, RIDE_MASK = 7;
 //__RIDE_PHYSICS_BEGIN__
+// Hold a direction and the paddler strokes; each same-direction stroke comes sooner and pulls harder (tempo).
+// A stroke is an 8-tick surge; between strokes the hull keeps its momentum and relaxes toward the water's own
+// lateral velocity (the cross-current), so you throw the boat, let it glide and brake with a counter-stroke.
+// Paddling costs Síla; it returns while gliding (3× in slack water), from stars and near misses. Gates passed
+// without running dry build the Série: ×2 after 5, FLOW ×3 after 15 (strokes at half price).
+// Only + − × ÷, Math.floor/min and comparisons: bit-deterministic like the classic Sim.
+const RIDE_RULES = 1;   // bump on ANY change to RideSim, RIDE_LEVELS or DRIVE (classic RULES stays 2)
+const DRIVE = [15, 39, 55, 63, 63, 55, 39, 15], DRIVE_SUM = 344;
+const RIDE_BASE = { drift: 65, drag: 3.5, J0: 230, J1: 440, vHull: 950, iSlow: 18, iFast: 14, switchGap: 9,
+  tempoUp: 0.6, tempoDecay: 1.6, glide: 18, cost0: 2, cost1: 3.2, regen: 24, calmRegen: 2, tiredRegen: 0.5,
+  eLow: 25, fMin: 0.5, tCap: 0.6, eBack: 35, starE: 25, nearE: 10, m2: 5, m3: 15, flowCost: 0.5, graceGates: 3, graceE: 30 };
+const RIDE_LEVELS = [
+  Object.assign({}, RIDE_BASE, { drift: 45, drag: 4.5, J0: 210, J1: 380, vHull: 800, iSlow: 20, tempoUp: 0.45,
+    cost0: 1.5, cost1: 2.4, regen: 30, fMin: 0.6, tCap: 1 }),   // Děti
+  Object.assign({}, RIDE_BASE),                               // Normální
+  Object.assign({}, RIDE_BASE, { drift: 80, regen: 20 }),     // Profi vodák
+];
 class RideSim extends Sim {
   constructor(course) {
     super(course);
-    this.energy = 1; this.tempo = 0; this.dir = 0; this.phase = 0; this.power = 0;
+    this.K = RIDE_LEVELS[levelOf(course.level).id];
+    this.E = 100; this.tempo = 0; this.since = 100000; this.lastDir = 0; this.latch = 0; this.prevInp = 0;
+    this.dk = 8; this.dJ = 0; this.side = 1; this.dir = 0;
+    this.tired = false; this.tiredCount = 0; this.streak = 0; this.bestStreak = 0;
+    this.mult = 1; this.meter = 0; this.flowOn = false; this.nears = 0;
   }
-  clone() { const s = super.clone(); return s; }
   step(inp) {
     if (!this.alive) return;
-    const c = this.c;
+    const c = this.c, K = this.K;
     if (this.x + 3200 > c.genX) c.ensure(this.x + 4200);
     this.px = this.x; this.py = this.y; this.pvy = this.vy;
-    const lv = c.lv;
     const cur = c.currentAt(this.x);
     if (cur !== this.cur) { this.cur = cur; this.events.push({ type: 'flip', cur }); }
-    const flow = c.flowAt(this.x);
-    const dir = (inp & RIDE_UP ? -1 : 0) + (inp & RIDE_DOWN ? 1 : 0);
-    // placeholder model: steer towards a target vertical speed, the current pushes a little
-    const target = dir * lv.stroke * 0.7;
-    this.vy += (target - this.vy) * 6 * DT;
-    this.vy += flow * lv.pull * 0.25 * DT;
-    if (dir !== 0) { this.phase += DT * 2.4; if (this.phase >= 1) { this.phase -= 1; this.strokes++; this.events.push({ type: 'stroke', n: this.strokes, dir }); } }
-    this.dir = dir;
-    if (this.vy > lv.maxDrift) this.vy = lv.maxDrift; else if (this.vy < -lv.maxDrift) this.vy = -lv.maxDrift;
-    this.vx = c.speedAt(this.x);
-    this.x += this.vx * DT;
-    this.y += this.vy * DT;
-    this.tick++;
-    this._collide();
-    if (this.alive) this._progress();
+    const flow = c.flowAt(this.x), calm = 1 - (flow < 0 ? -flow : flow);
+    const w = flow * K.drift;                        // the water's lateral velocity (0 in slack water)
+    if (this.floorTest) { this.E = 0; this.tired = true; }   // tools only
+    // 1) paddle scheduler: every press edge gets its stroke, holding repeats at the tempo's cadence
+    let st = inp & 3; if (st === 3) st = 0;
+    if (st !== 0 && st !== this.prevInp) this.latch = st;
+    this.prevInp = st;
+    const want = st !== 0 ? st : this.latch;
+    this.since++;
+    if (want !== 0) {
+      const d = want === 1 ? -1 : 1;
+      const need = d === this.lastDir ? Math.floor(K.iSlow - (K.iSlow - K.iFast) * this.tempo) : K.switchGap;
+      if (this.since >= need) this._stroke(d, w);
+    }
+    this.dir = want === 1 ? -1 : want === 2 ? 1 : 0;
+    // 2) rhythm fades and Síla returns while gliding; an exhausted paddler recovers slowly even while paddling
+    const gliding = want === 0 && this.since > K.glide;
+    if (gliding) { this.tempo -= K.tempoDecay * DT; if (this.tempo < 0) this.tempo = 0; }
+    if (gliding || this.tired) {
+      this.E += K.regen * (gliding ? 1 + K.calmRegen * calm : K.tiredRegen) * DT;
+      if (this.E > 100) this.E = 100;
+    }
+    if (this.tired && this.E >= K.eBack) { this.tired = false; this.events.push({ type: 'rested' }); }
+    // 3) hull: stroke surge, then lateral velocity relaxes toward the water's (linear drag = momentum + glide)
+    if (this.dk < 8) { this.vy += this.dJ * DRIVE[this.dk] / DRIVE_SUM; this.dk++; }
+    this.vy = w + (this.vy - w) * (1 - K.drag * DT);
+    const md = c.lv.maxDrift; if (this.vy > md) this.vy = md; else if (this.vy < -md) this.vy = -md;
+    // 4) forward motion, hitboxes, gates: identical to Sim (course timing and moving booms unchanged)
+    this.vx = c.speedAt(this.x); this.x += this.vx * DT; this.y += this.vy * DT; this.tick++;
+    this._collide(); if (this.alive) this._progress();
   }
+  _stroke(d, w) {
+    const K = this.K;
+    let eff = 1 - (this.vy - w) * d / K.vHull;      // a fast hull bites less; against its own motion >1 = brake
+    if (eff < 0) eff = 0; else if (eff > 1.5) eff = 1.5;
+    const J = K.J0 + (K.J1 - K.J0) * this.tempo;      // rhythm builds power
+    const fE = this.E >= K.eLow ? 1 : K.fMin + (1 - K.fMin) * this.E / K.eLow;   // tired arms, never zero
+    this.dJ = d * J * fE * eff; this.dk = 0;
+    let cost = this.tired ? 0 : K.cost0 + K.cost1 * this.tempo;
+    if (this.flowOn) cost *= K.flowCost;              // FLOW: half price
+    this.E -= cost;
+    if (this.gatesPassed < K.graceGates && this.E < K.graceE) this.E = K.graceE;   // onboarding grace
+    if (this.E <= 0) { this.E = 0; if (!this.tired) { this.tired = true; this.tiredCount++; this._setStreak(0); this.events.push({ type: 'tired' }); } }
+    const isCatch = d !== this.lastDir || this.since > K.glide;
+    this.tempo = d === this.lastDir ? Math.min(this.tired ? K.tCap : 1, this.tempo + K.tempoUp) : this.tempo * 0.4;
+    this.lastDir = d; this.since = 0; this.latch = 0; this.strokes++; this.side = -this.side;
+    this.events.push({ type: 'stroke', n: this.strokes, d, side: this.side, power: fE * eff * J / K.J1, tempo: this.tempo,
+      brake: eff > 1.05, catch: isCatch, iv: Math.floor(K.iSlow - (K.iSlow - K.iFast) * this.tempo) });
+  }
+  _setStreak(v) {
+    const K = this.K;
+    this.streak = v; if (v > this.bestStreak) this.bestStreak = v;
+    const m = v >= K.m3 ? 3 : v >= K.m2 ? 2 : 1;
+    if (m !== this.mult) { this.events.push({ type: 'mult', mult: m, up: m > this.mult }); this.mult = m; }
+    this.meter = m === 1 ? v / K.m2 : m === 2 ? (v - K.m2) / (K.m3 - K.m2) : 1;
+    if ((m === 3) !== this.flowOn) { this.flowOn = m === 3; this.events.push({ type: 'flow', on: this.flowOn }); }
+  }
+  _progress() {                                       // full override; the classic Sim._progress stays byte-identical
+    const c = this.c, K = this.K;
+    while (this.nextGate < c.gates.length && this.x > c.gates[this.nextGate].passX) {
+      const g = c.gates[this.nextGate], near = this.gateClear < 7;
+      this.nextGate++; this.gatesPassed++;
+      this._setStreak(this.streak + 1);                // the gate that completes a tier already pays the new mult
+      this.score += this.mult;
+      if (near) { this.nears++; this.E += K.nearE; if (this.E > 100) this.E = 100; }
+      this.events.push({ type: 'gate', n: g.n, near, pts: this.mult, mult: this.mult });
+      this.gateClear = 1e9;
+    }
+    const st = c.stars;
+    while (this.nextStar < st.length && st[this.nextStar].x < this.x - 40) this.nextStar++;
+    for (let i = this.nextStar; i < st.length && st[i].x < this.x + 40; i++) {
+      const s = st[i]; if (this.taken.includes(s.id)) continue;
+      const rr = PHYS.starR + PHYS.hitR[1] + 4;
+      if ((s.x - this.x) * (s.x - this.x) + (s.y - this.y) * (s.y - this.y) < rr * rr) {
+        this.taken.push(s.id); this.starsGot++; this.score += this.mult;
+        this.E += K.starE; if (this.E > 100) this.E = 100;
+        this.events.push({ type: 'star', id: s.id, x: s.x, y: s.y, pts: this.mult });
+      }
+    }
+  }
+}
+// A human-ish free-ride pilot (tests, attract): aims at the nearest opening and holds toward it unless the
+// boat would already glide there if released now.
+function pilotRide(sim, lead = 0.8, db = 18) {
+  const c = sim.c, g = c.gates[sim.nextGate];
+  if (!g) return 0;
+  const eta = Math.max(0, (g.x - sim.x) / sim.vx);
+  const off = g.move ? moveOffset(g.move, sim.tick + eta * TICK_RATE) : 0;
+  let best = g.open[0];
+  for (const o of g.open) if (Math.abs(o.cy + off - sim.y) < Math.abs(best.cy + off - sim.y)) best = o;
+  const ty = best.cy + off, K = sim.K, w = c.flowAt(sim.x) * K.drift;
+  const coast = sim.y + (sim.vy - w) / K.drag * lead + w * Math.min(eta, 0.5);
+  const err = coast - ty;
+  return err > db ? RIDE_UP : err < -db ? RIDE_DOWN : 0;
 }
 //__RIDE_PHYSICS_END__
 
@@ -517,18 +614,23 @@ const Replay = {
     const vu = v => { v = Math.max(0, Math.floor(v)); while (v >= 128) { w.push((v & 127) | 128); v = Math.floor(v / 128); } w.push(v); };
     const str = (s, max) => { const b = _te.encode(cleanText(s, max)); vu(b.length); for (const x of b) w.push(x); };
     const ride = r.ctrl === CTRL.ride;
-    w.push(ride ? 4 : 3, RULES, r.mode & 255, levelOf(r.level).id);
-    if (ride) w.push(CTRL.ride);
+    w.push(ride ? 5 : 3, RULES, r.mode & 255, levelOf(r.level).id);
+    if (ride) w.push(CTRL.ride, RIDE_RULES);
     const sd = r.seed >>> 0; w.push(sd & 255, (sd >>> 8) & 255, (sd >>> 16) & 255, sd >>> 24);
     vu(r.score); vu(r.endTick); vu(r.pauses | 0);
     str(r.name, 16); str(r.label, 32);
     let prev = -1;
     if (ride) {
-      vu(r.inputs.length);
+      // only real changes; each new state is one of the two states ≠ the previous one → 1 bit
+      const ch = []; let ps = 0;
       for (const [t, st] of r.inputs) {
+        if (st > 2 || st < 0) throw new Error('ride input state must be 0..2');
+        if (st === ps) continue;
         if (!(t > prev)) throw new Error('input changes must be strictly increasing');
-        vu(t - prev - 1); w.push(st & 255); prev = t;
+        ch.push([t - prev - 1, (ps === 0 ? st === 2 : ps === 1 ? st === 2 : st === 1) ? 1 : 0]); prev = t; ps = st;
       }
+      vu(ch.length);
+      for (const [dt, bit] of ch) vu(dt * 2 + bit);
     } else {
       vu(r.taps.length);
       for (const t of r.taps) {
@@ -557,7 +659,7 @@ const Replay = {
     const vu = () => { let v = 0, mul = 1; for (let i = 0; i < 6; i++) { const x = u8(); v += (x & 127) * mul; if (!(x & 128)) return v; mul *= 128; } throw bad(); };
     const str = n => { const l = vu(); if (l > 200) throw bad(); need(l); const s = _td.decode(b.subarray(p, p + l)); p += l; return cleanText(s, n); };
     const ver = u8();
-    if (ver < 1 || ver > 4) throw new Error('Kód je z novější verze hry.');
+    if (ver < 1 || ver > 5) throw new Error('Kód je z novější verze hry.');
     const rules = ver === 1 ? 1 : u8();
     if (rules !== RULES) throw new Error('Kód je ze starší verze pravidel hry — přehrát ho nejde.');
     const mode = u8();
@@ -565,6 +667,7 @@ const Replay = {
     if (level > 2) throw bad();
     const ctrl = ver >= 4 ? u8() : CTRL.tap;
     if (ctrl > CTRL.ride) throw new Error('Kód je z novější verze hry.');
+    if (ctrl === CTRL.ride && (ver !== 5 || u8() !== RIDE_RULES)) throw new Error('Kód je ze starší verze Volné jízdy — přehrát ho nejde.');
     need(4);
     const seed = (b[p] | (b[p + 1] << 8) | (b[p + 2] << 16) | (b[p + 3] << 24)) >>> 0; p += 4;
     const score = vu(), endTick = vu();
@@ -575,7 +678,13 @@ const Replay = {
     let prev = -1;
     if (ctrl === CTRL.ride) {
       const inputs = new Array(n);
-      for (let i = 0; i < n; i++) { prev = prev + 1 + vu(); inputs[i] = [prev, u8() & RIDE_MASK]; }
+      let ps = 0;
+      for (let i = 0; i < n; i++) {
+        const v = vu(), bit = v % 2;
+        prev = prev + 1 + (v - bit) / 2;
+        const ns = ps === 0 ? (bit ? 2 : 1) : ps === 1 ? (bit ? 2 : 0) : (bit ? 1 : 0);
+        inputs[i] = [prev, ns]; ps = ns;
+      }
       if (n && prev >= endTick) throw bad();
       return { mode, level, ctrl, seed, score, endTick, name, label, taps: [], inputs, pauses, rules };
     }
@@ -1564,7 +1673,7 @@ function createAudioEngine(opts) {
 
   const METHODS = ['unlock', 'setVolumes', 'setMuted', 'setPaused', 'startAmbience', 'stopAmbience',
     'setScene', 'startMusic', 'stopMusic', 'setMusicState', 'stroke', 'gate', 'star', 'nearMiss',
-    'flip', 'crash', 'record', 'ui', 'countdown'];
+    'flip', 'crash', 'record', 'ui', 'countdown', 'heartbeat'];
   const G = (typeof globalThis !== 'undefined') ? globalThis : (typeof window !== 'undefined' ? window : {});
   let AC = null;
   try { AC = G.AudioContext || G.webkitAudioContext || null; } catch (e) { AC = null; }
@@ -2582,6 +2691,20 @@ function createAudioEngine(opts) {
     whoosh(ctx.currentTime, 0.32, 600, rnd(2400, 3200), 900, 0.09, 1.0, 1.8, -0.7 * d, 0.7 * d, 0.15);
   }
 
+  // Low strength (free ride): a soft double thump, felt more than heard.
+  function sfxHeartbeat() {
+    const t = ctx.currentTime, n = [];
+    const srcs = [];
+    for (const [dt, f, v] of [[0, 62, 0.34], [0.16, 54, 0.24]]) {
+      const o = mkOsc('sine', f, n), g = mkGain(0, n), tt = t + dt;
+      o.frequency.setValueAtTime(f * 1.4, tt); o.frequency.exponentialRampToValueAtTime(f, tt + 0.06);
+      envAD(g.gain, tt, 0.006, v, 0.16);
+      o.connect(g); route(g, SFX(), 0, 0.05, n);
+      o.start(tt); o.stop(tt + 0.3); srcs.push(o);
+    }
+    voice(0, srcs, n);
+  }
+
   // Current reversal: rising whoosh sweeping across the stereo field + sub swell + soft landing thump.
   function sfxFlip() {
     const t = ctx.currentTime, d = Math.random() < 0.5 ? -1 : 1;
@@ -2760,6 +2883,7 @@ function createAudioEngine(opts) {
     crash: safe(function () { if (canPlay() && cnt[0] < MAX_SFX + 8) sfxCrash(); }),
     record: safe(function () { if (canPlay() && cnt[0] < MAX_SFX + 8) sfxRecord(); }),
     ui: safe(function (kind) { if (canPlay()) sfxUi(String(kind || 'click')); }),
+    heartbeat: safe(function () { if (canPlay() && cnt[0] < MAX_SFX) sfxHeartbeat(); }),
     countdown: safe(function (k) { if (canPlay() && cnt[0] < MAX_SFX + 4) sfxCountdown(num(k, 0)); }),
     isUnlocked: function () { return !!(ready && ctx && ctx.state === 'running'); },
     stats: function () {
@@ -2845,13 +2969,15 @@ const Store = {
   },
 };
 const reducedMotion = (() => { try { return matchMedia('(prefers-reduced-motion: reduce)').matches; } catch { return false; } })();
-const DEFAULTS = { name: '', sfx: 0.8, music: 0.5, amb: 0.7, ghosts: true, shake: !reducedMotion, haptics: true, hitbox: false, quality: 'auto', res: 'auto', frame: isNative ? 'full' : '1280', fps: false, water3d: false, tutorial: true, level: 1 };
+const DEFAULTS = { name: '', sfx: 0.8, music: 0.5, amb: 0.7, ghosts: true, shake: !reducedMotion, haptics: true, hitbox: false, quality: 'auto', res: 'auto', frame: isNative ? 'full' : '1280', fps: false, water3d: false, coast: 'auto', rideTut: 0, tutorial: true, level: 1 };
 const S = Object.assign({}, DEFAULTS, Store.get('settings', {}));
 const saveSettings = () => Store.set('settings', S);
 // Records are kept per difficulty level: a kids' score never competes with a pro's.
 const blankLevelRec = () => ({ free: { best: 0 }, seeds: {}, daily: {}, rivers: {} });
 const REC = Object.assign({ L: [], R: [], challenges: [], stats: { runs: 0, gates: 0, stars: 0, strokes: 0, dist: 0, time: 0 } }, Store.get('records2', {}));
 for (let i = 0; i < 3; i++) { REC.L[i] = Object.assign(blankLevelRec(), REC.L[i] || {}); REC.R[i] = Object.assign(blankLevelRec(), REC.R[i] || {}); }
+// free-ride records from other ride rules (e.g. the unreleased placeholder) cannot be replayed: start clean
+if (REC.rideRules !== RIDE_RULES) { for (let i = 0; i < 3; i++) REC.R[i] = blankLevelRec(); REC.challenges = REC.challenges.filter(h => (h.ctrl | 0) !== CTRL.ride); REC.rideRules = RIDE_RULES; }
 // Old (rules v1) records cannot be verified under the new physics; only the lifetime stats carry over.
 if (!Store.get('records2', null)) { const old = Store.get('records', null); if (old && old.stats) Object.assign(REC.stats, old.stats); }
 // records per level and control scheme (classic taps / free ride)
@@ -3618,6 +3744,58 @@ function ambient(dt, course) {
 // ─── Boat drawing ──────────────────────────────────────────────────────────
 const HULL = { player: ['#ff7a45', '#e4572e', '#a5321a'], ghost: ['#9fe8ff', '#4cc3f0', '#1d7fa8'], pb: ['#e3c8ff', '#b18cf0', '#7552b8'] };
 const hullGrads = new Map();
+let strengthShow = 0;
+function drawStrengthBar(c, bs, sim) {
+  const e = clamp(sim.E / 100, 0, 1), flashA = clamp(1 - (VT - (G.barFlash || -9)) / 0.35, 0, 1);
+  const busy = e < 0.985 || sim.tired || flashA > 0;
+  strengthShow = busy ? Math.min(1, strengthShow + 0.12) : Math.max(0, strengthShow - 0.02);
+  if (strengthShow <= 0.01) return;
+  // at least ~44×6 CSS px so it stays readable on a phone
+  const w = Math.max(48, 44 / V.s), hgt = Math.max(5, 6 / V.s), x = bs.x - w / 2, y = bs.y + 22;
+  const pulse = (e < 0.35 || sim.tired) && !reducedMotion ? 0.6 + 0.4 * Math.sin(VT * 18) : 1;
+  c.save(); c.globalAlpha = strengthShow * 0.9;
+  c.fillStyle = 'rgba(0,20,30,0.6)'; roundRect(c, x - 1.5, y - 1.5, w + 3, hgt + 3, 4); c.fill();
+  if (sim.flowOn) { c.strokeStyle = 'rgba(255,214,110,0.95)'; c.lineWidth = 1.4; roundRect(c, x - 1.5, y - 1.5, w + 3, hgt + 3, 4); c.stroke(); }
+  c.globalAlpha = strengthShow * pulse;
+  c.fillStyle = sim.tired ? '#ff5a4a' : e >= 0.6 ? '#7fe3a0' : e >= 0.35 ? '#ffd34d' : '#ff6a4a';
+  if (e > 0.02) { roundRect(c, x, y, w * e, hgt, 2.5); c.fill(); }
+  if (sim.tired) {   // diagonal stripes while exhausted
+    c.save(); roundRect(c, x, y, w, hgt, 2.5); c.clip();
+    c.strokeStyle = 'rgba(255,90,74,0.55)'; c.lineWidth = 1.6; c.beginPath();
+    for (let sx = x - hgt; sx < x + w; sx += 5) { c.moveTo(sx, y + hgt); c.lineTo(sx + hgt, y); }
+    c.stroke(); c.restore();
+  }
+  c.globalAlpha = strengthShow * 0.8; c.fillStyle = 'rgba(255,255,255,0.7)'; c.fillRect(x + w * 0.25 - 0.4, y - 1, 0.8, hgt + 2);   // where power starts to fade
+  if (flashA > 0) { c.globalAlpha = flashA * 0.7; c.fillStyle = '#fff'; roundRect(c, x, y, w, hgt, 2.5); c.fill(); }
+  c.restore();
+}
+// up to three chevrons on the travel side: direction + tempo at a glance
+function drawTempoChevrons(c, bs, sim) {
+  if (!sim.dir) return;
+  const lit = sim.tempo >= 0.95 ? 3 : sim.tempo >= 0.5 ? 2 : 1, d = sim.dir;
+  c.save();
+  c.lineWidth = 2; c.lineCap = 'round'; c.lineJoin = 'round';
+  for (let i = 0; i < 3; i++) {
+    const y = bs.y + d * (19 + i * 6), on = i < lit;
+    c.strokeStyle = on ? (sim.flowOn ? 'rgba(255,220,120,0.95)' : 'rgba(255,255,255,0.9)') : 'rgba(255,255,255,0.22)';
+    c.beginPath(); c.moveTo(bs.x - 5, y - d * 2); c.lineTo(bs.x, y + d * 2); c.lineTo(bs.x + 5, y - d * 2); c.stroke();
+  }
+  c.restore();
+}
+// "kam doklouže": where the hull will be at the next gate (max 0.8 s) if released now
+const rideCoastOn = () => S.coast === 'on' || (S.coast !== 'off' && G.level !== 2);
+function drawCoastRing(c, bs, sim, course) {
+  const K = sim.K; if (!K) return;
+  const g = course.gates[sim.nextGate];
+  const T = Math.min(0.8, g ? Math.max(0.05, (g.x - bs.x) / Math.max(1, sim.vx)) : 0.8);
+  const w = course.flowAt(bs.x) * K.drift;
+  const py = bs.y + w * T + (bs.vy - w) * (1 - Math.exp(-K.drag * T)) / K.drag, px = bs.x + sim.vx * T;
+  c.save(); c.globalAlpha = 0.35; c.strokeStyle = '#ffffff'; c.lineWidth = 2;
+  c.beginPath(); c.arc(px, py, 9, 0, TAU); c.stroke();
+  c.globalAlpha = 0.2; c.beginPath(); c.moveTo(bs.x + 30, bs.y); c.lineTo(px - 9, py); c.stroke();
+  c.restore();
+}
+
 function drawBoat(c, x, y, ang, pad, style, alpha = 1, night = 0) {
   const [hl, hb, hd] = HULL[style] || HULL.player;
   c.save();
@@ -3680,12 +3858,12 @@ function drawBoat(c, x, y, ang, pad, style, alpha = 1, night = 0) {
 
 function paddlePose(st, now) {
   // st: { side, t } last stroke
-  const d = 0.3;
+  const d = (st && st.dur) || 0.3;
   const p = st && now - st.t < d ? (now - st.t) / d : 1;
   if (p < 1) {
     const e = 1 - (1 - p) * (1 - p);
     const sweep = -0.85 + 1.7 * e;
-    return { beta: Math.PI / 2 + st.side * sweep, dipSide: st.side, dip: Math.sin(p * Math.PI) };
+    return { beta: Math.PI / 2 + st.side * sweep, dipSide: st.side, dip: Math.sin(p * Math.PI) * (st.pw === undefined ? 1 : clamp(0.45 + 0.55 * st.pw, 0.4, 1)) };
   }
   return { beta: Math.PI / 2 + Math.sin(now * 1.7) * 0.1, dipSide: 0, dip: 0 };
 }
@@ -4017,7 +4195,9 @@ function render(now, dt) {
 
   // 2D wake lines (subtle accent over the shader wake; the whole wake without WebGL)
   const wakeK = water ? 0.35 : 1;
-  drawWake(c, trail, flow, '255,255,255', wakeK);
+  const rideW = G.ctrl === CTRL.ride && G.state !== 'menu' && sim && sim.E !== undefined;
+  drawWake(c, trail, flow, rideW ? (sim.flowOn ? '255,220,140' : sim.mult === 2 ? '170,255,240' : '255,255,255') : '255,255,255', wakeK, rideW ? 1 + Math.min(1, Math.abs(sim.vy) / 450) : 1);
+  if (rideW && sim.flowOn && sim.alive && VT - (G.sparkAt || 0) > 0.2) { G.sparkAt = VT; const [hx, hy] = sim.heading(); spawn({ k: 'spark', x: sim.x + hx * 28, y: sim.y + hy * 28, vx: 60 + Math.random() * 60, vy: (Math.random() - 0.5) * 80, s: 1.4, life: 0.4 }); }
   if (S.ghosts) for (const gh of G.ghosts) { const tr = ghostTrails.get(gh); if (tr) drawWake(c, tr, flow, '190,240,255', wakeK * 0.5); }
 
   // foam particles (water level)
@@ -4090,7 +4270,14 @@ function render(now, dt) {
     }
   } else if (sim) {
     const st = G.state === 'menu' ? G.attract.pad : G.pad;
-    drawBoat(c, bs.x, bs.y, boatAngle(bs.vx, bs.vy), paddlePose(st, VT), 'player', 1, night);
+    const ride = G.ctrl === CTRL.ride && G.state !== 'menu' && sim.E !== undefined;
+    if (ride) {   // cosmetic yaw spring kicked by each stroke (the hitbox keeps the sim heading)
+      const ddt = Math.min(dt, 0.05);
+      G.yawV += (-120 * G.yaw - 14 * G.yawV) * ddt; G.yaw = clamp(G.yaw + G.yawV * ddt, -0.06, 0.06);
+      if (rideCoastOn()) drawCoastRing(c, bs, sim, course);
+    }
+    drawBoat(c, bs.x, bs.y, boatAngle(bs.vx, bs.vy) + (ride ? G.yaw : 0), paddlePose(st, VT), 'player', 1, night);
+    if (ride) { drawTempoChevrons(c, bs, sim); drawStrengthBar(c, bs, sim); }
   }
 
   // flying particles
@@ -4270,7 +4457,7 @@ function drawRays(c, a) {
 }
 
 // Wake lines batched into a few alpha buckets: one stroke per bucket instead of per segment.
-function drawWake(c, tr, flow, rgb, k = 1) {
+function drawWake(c, tr, flow, rgb, k = 1, spread = 1) {
   if (tr.length < 3) return;
   const BUCKETS = 6;
   c.lineCap = 'round';
@@ -4286,7 +4473,7 @@ function drawWake(c, tr, flow, rgb, k = 1) {
       const px = p.x + flow * ap, py = p.y, qx = q.x + flow * aq, qy = q.y;
       let dx = px - qx, dy = py - qy;
       const l = Math.hypot(dx, dy) || 1; dx /= l; dy /= l;
-      const nx = -dy, ny = dx, op = 6 + age * 26, oq = 6 + (aq / TRAIL_LIFE) * 26;
+      const nx = -dy, ny = dx, op = (6 + age * 26) * spread, oq = (6 + (aq / TRAIL_LIFE) * 26) * spread;
       c.moveTo(px + nx * op, py + ny * op); c.lineTo(qx + nx * oq, qy + ny * oq);
       c.moveTo(px - nx * op, py - ny * op); c.lineTo(qx - nx * oq, qy - ny * oq);
       any = true;
@@ -4514,13 +4701,20 @@ function handleEvent(ev, sim, quiet) {
   switch (ev.type) {
     case 'stroke': {
       const holder = quiet ? G.attract : G;
-      const side = holder.pad && holder.pad.side ? -holder.pad.side : 1;
-      holder.pad = { side, t: VT };
+      const side = ev.side || (holder.pad && holder.pad.side ? -holder.pad.side : 1);
+      const pw = ev.power === undefined ? 1 : clamp(ev.power, 0.15, 1.4);
+      holder.pad = { side, t: VT, pw, dur: ev.iv ? clamp(ev.iv / 120, 0.11, 0.3) : 0.3 };
+      if (isPlayer && G.ctrl === CTRL.ride) { G.yawV += (ev.d || 0) * 0.9 * pw; if (ev.brake) rideHint(4, 'Opačný záběr = brzda'); }
       const [bx, by] = bladePos(sim, side);
-      addRipple(bx, by, 0.6, 0.9);
-      for (let i = 0; i < 7; i++) spawn({ k: 'drop', x: bx, y: by, z: 2, vx: (Math.random() - 0.7) * 120, vy: side * (20 + Math.random() * 60), vz: 120 + Math.random() * 120, s: 0.9 + Math.random() * 1.3, life: 0.6 });
+      addRipple(bx, by, 0.6 * pw, 0.9);
+      const nd = Math.round(3 + 4 * pw);
+      for (let i = 0; i < nd; i++) spawn({ k: 'drop', x: bx, y: by, z: 2, vx: (Math.random() - 0.7) * 120 * (ev.brake ? -1 : 1), vy: side * (20 + Math.random() * 60) * (0.6 + 0.4 * pw), vz: 120 + Math.random() * 120, s: 0.9 + Math.random() * 1.3, life: 0.6 });
       for (let i = 0; i < 3; i++) spawn({ k: 'foam', x: bx + (Math.random() - 0.5) * 6, y: by + (Math.random() - 0.5) * 6, s: 2 + Math.random() * 2, life: 0.9, vx: -40, vy: side * 10 });
-      if (isPlayer) { A.stroke(side * 0.6, 1); Native.haptic('stroke'); }
+      if (isPlayer) {
+        const ride = G.ctrl === CTRL.ride;
+        A.stroke(side * (ride ? 0.25 : 0.6), ride ? clamp(0.35 + 0.65 * pw, 0.2, 1.2) : 1);
+        if (!ride || ev.catch || ev.brake) Native.haptic('stroke');
+      }
       break;
     }
     case 'gate':
@@ -4530,22 +4724,50 @@ function handleEvent(ev, sim, quiet) {
         if (G.sim.gatesPassed >= 1) $('tapHint').classList.add('hidden');
         if (S.tutorial && G.sim.gatesPassed >= 3) { S.tutorial = false; saveSettings(); }
         bumpScore();
-        if (ev.near) { spawn({ k: 'text', text: 'Těsně!', x: sim.x + 10, y: sim.y - 30, life: 0.9, col: '#ffe08a', size: 14 }); A.nearMiss(); }
+        const ride = G.ctrl === CTRL.ride;
+        if (ev.near) { spawn({ k: 'text', text: ride ? 'Těsně! +⚡' : 'Těsně!', x: sim.x + 10, y: sim.y - 30, life: 0.9, col: '#ffe08a', size: 14 }); A.nearMiss(); G.barFlash = VT; }
+        if (ride && ev.pts > 1) spawn({ k: 'text', text: '+' + ev.pts, x: sim.x + 24, y: sim.y - 14, life: 0.7, col: sim.flowOn ? '#ffe9a8' : '#ffd34d', size: 15 });
+        if (ride && sim.gatesPassed === 1) rideHint(128, '5 branek bez vyčerpání = ×2');
         if (G.sim.score > G.bestBefore && G.bestBefore > 0 && !G.recordFlag) { G.recordFlag = true; showBanner('Nový rekord!', 'Pokračuj, každý bod se počítá', 1600); }
-        const sc = G.sim.score;
-        if (sc === 10 || sc === 25 || sc === 50 || sc === 75 || sc === 100 || (sc > 100 && sc % 50 === 0)) showBanner(String(sc), sc >= 50 ? 'Legendární jízda!' : 'Skvělé tempo!', 1100);
+        // milestones: by score in classic, by gates in free ride (its score runs ×3)
+        const sc = ride ? sim.gatesPassed : G.sim.score;
+        if (sc === 10 || sc === 25 || sc === 50 || sc === 75 || sc === 100 || (sc > 100 && sc % 50 === 0)) showBanner(ride ? sc + ' branek' : String(sc), sc >= 50 ? 'Legendární jízda!' : 'Skvělé tempo!', 1100);
       }
       break;
     case 'star': {
       for (let i = 0; i < 16; i++) { const a = Math.random() * TAU, v = 60 + Math.random() * 160; spawn({ k: 'spark', x: ev.x, y: ev.y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, s: 1.5 + Math.random() * 2, life: 0.5 + Math.random() * 0.3 }); }
       addRipple(ev.x, ev.y, 0.8, 1);
-      if (isPlayer) { spawn({ k: 'text', text: '+1', x: ev.x, y: ev.y - 16, life: 0.8, col: '#ffd34d', size: 17 }); A.star(); bumpScore(); }
+      if (isPlayer) {
+        const ride = G.ctrl === CTRL.ride;
+        spawn({ k: 'text', text: '+' + (ev.pts || 1) + (ride ? ' ⚡' : ''), x: ev.x, y: ev.y - 16, life: 0.8, col: '#ffd34d', size: 17 }); A.star(); bumpScore();
+        if (ride) { G.barFlash = VT; rideHint(16, '★ = body i síla'); }
+      }
       break;
     }
+    case 'tired':
+      if (isPlayer) {
+        showBanner('Došly síly!', 'Pusť pádlo a nech loď klouzat — síla se vrátí', 1500, 1); A.nearMiss(); Native.haptic('flip'); flash = 0.12; flashColor = '255,90,70';
+        const el = $('hudMult'); el.textContent = 'Série ztracena'; el.classList.add('lost'); rideHud.lostUntil = performance.now() + 1000;
+      }
+      break;
+    case 'rested':
+      if (isPlayer) { spawn({ k: 'text', text: 'Síla zpět', x: sim.x, y: sim.y - 34, life: 0.9, col: '#bff3ff', size: 13 }); G.barFlash = VT; }
+      break;
+    case 'mult':
+      if (isPlayer && ev.up) {
+        const el = $('hudMult'); el.classList.remove('pop'); void el.offsetWidth; el.classList.add('pop');
+        A.gate(8 + ev.mult * 4); Native.haptic('stroke');
+        if (ev.mult === 2) { spawn({ k: 'text', text: '×2 Plynulá jízda!', x: sim.x, y: sim.y - 40, life: 1.1, col: '#ffd34d', size: 15 }); rideHint(32, 'Série ×2! Když ti dojde síla, spadne na ×1'); }
+      }
+      break;
+    case 'flow':
+      if (isPlayer && ev.on) { showBanner('FLOW ×3', 'Pádlování za půl síly', 1300, 1); A.record(); Native.haptic('record'); }
+      break;
     case 'flip':
       if (isPlayer) {
         A.flip(); Native.haptic('flip'); trauma = Math.min(1, trauma + 0.35); G.flipAt = VT;
-        showBanner(ev.cur < 0 ? 'Protiproud!' : 'Proud se vrací', ev.cur < 0 ? 'Proud teď táhne NAHORU — záběr tě pošle dolů' : 'Proud opět táhne dolů', 1700, 2);
+        if (G.ctrl === CTRL.ride) showBanner(ev.cur < 0 ? 'Protiproud!' : 'Proud se vrací', ev.cur < 0 ? 'Proud teď nese loď NAHORU — dolů musíš pádlovat' : 'Proud zase nese loď DOLŮ', 1700, 2);
+        else showBanner(ev.cur < 0 ? 'Protiproud!' : 'Proud se vrací', ev.cur < 0 ? 'Proud teď táhne NAHORU — záběr tě pošle dolů' : 'Proud opět táhne dolů', 1700, 2);
       }
       break;
     case 'crash': {
@@ -4602,6 +4824,10 @@ function prepareRun(opt) {
   clearTimeout(bannerTimer); bannerPrioUntil = 0; $('banner').classList.remove('show');
   $('fade').classList.remove('on');
   $('hudScore').textContent = '0';
+  rideHud.mult = rideHud.meter = -1; rideHud.flow = null; rideHud.lostUntil = 0; $('hudMult').classList.remove('lost');
+  G.yaw = G.yawV = 0; G.barFlash = -9; G.holdFrom = 0; G.hintAt = -9; G.beatAt = 0;
+  document.body.classList.toggle('rideReady', G.ctrl === CTRL.ride);
+  updateRideHud();
   $('hudMode').textContent = `${G.label} · ${levelName(G.level)}`;
   $('hudBest').textContent = G.bestBefore ? 'Rekord ' + G.bestBefore : '';
   updateRaceHud();
@@ -4637,7 +4863,7 @@ function beginPlay(ts) {
   G.state = 'play';
   G.t0 = ts;
   if (S.tutorial) $('tapHint').classList.add('playing'); else $('tapHint').classList.add('hidden');
-  if (G.ctrl === CTRL.ride) G.rideQ.push([0, rideState()]);
+  if (G.ctrl === CTRL.ride) { G.rideQ.push([0, rideState()]); document.body.classList.remove('rideReady'); }
   else queueTap(ts);
 }
 
@@ -4700,11 +4926,47 @@ function updatePlay(now) {
   if (nextFlip !== undefined && nextFlip - sim.x < 520 && G.flipWarned !== nextFlip) {
     G.flipWarned = nextFlip;
     const willBe = G.course.currentAt(nextFlip + 1);
-    showBanner('⚠ Klidná voda, pak protiproud', willBe < 0 ? 'Za klidnou vodou tě proud potáhne nahoru' : 'Za klidnou vodou se proud vrací dolů', 1600, 2);
+    if (G.ctrl === CTRL.ride) showBanner('⚠ Klidná voda, pak protiproud', 'V klidné vodě se síla vrací 3× rychleji', 1600, 2);
+    else showBanner('⚠ Klidná voda, pak protiproud', willBe < 0 ? 'Za klidnou vodou tě proud potáhne nahoru' : 'Za klidnou vodou se proud vrací dolů', 1600, 2);
   }
   updateRaceHud();
+  updateRideHud();
+  if (G.ctrl === CTRL.ride) rideTick(sim);
 }
 
+// one-time onboarding hints for free ride (bitmask in S.rideTut), at most one every 3 s
+function rideHint(bit, text) {
+  if (G.ctrl !== CTRL.ride || (S.rideTut & bit) || S.rideTut === 255 || VT - (G.hintAt || -9) < 3) return;
+  S.rideTut |= bit; saveSettings(); G.hintAt = VT;
+  showBanner(text, '', 1500, 0);
+}
+function rideTick(sim) {
+  const now = VT;
+  // release after a real hold → glide hint
+  if (G.rideSt !== 0) { if (!G.holdFrom) G.holdFrom = now; }
+  else { if (G.holdFrom && now - G.holdFrom > 0.25) rideHint(1, 'Pusť a loď klouže dál'); G.holdFrom = 0; }
+  if (sim.tempo >= 0.95) rideHint(2, 'Tempo naplno — rychlé, ale bere sílu');
+  if (sim.gatesPassed >= 3 && sim.E < 50 && !sim.tired) rideHint(8, 'Síla ubývá — pusť a nech loď klouzat');
+  if (G.course.flips.length && Math.abs(G.course.flowAt(sim.x)) < 0.4) rideHint(64, 'Klidná voda — síla se vrací 3× rychleji');
+  if (sim.streak >= 10 && S.rideTut !== 255) { S.rideTut = 255; saveSettings(); }
+  // eyes-free warning: a soft heartbeat while strength runs low
+  if (sim.E > 0 && sim.E < 25 && !sim.tired && now - (G.beatAt || 0) > 0.7) { G.beatAt = now; A.heartbeat(); }
+}
+
+const rideHud = { mult: -1, meter: -1, flow: null, lostUntil: 0 };
+function updateRideHud() {
+  const sim = G.sim;
+  if (!sim || G.ctrl !== CTRL.ride) return;
+  const mult = sim.mult || 1, meter = Math.round(clamp(sim.meter || 0, 0, 1) * 100) / 100, flow = !!sim.flowOn;
+  if (rideHud.lostUntil) { if (performance.now() < rideHud.lostUntil) return; rideHud.lostUntil = 0; rideHud.mult = -1; $('hudMult').classList.remove('lost'); }
+  if (mult !== rideHud.mult || flow !== rideHud.flow) {
+    rideHud.mult = mult; rideHud.flow = flow;
+    const el = $('hudMult');
+    el.textContent = flow ? 'FLOW ×' + mult : '×' + mult;
+    el.classList.toggle('dim', mult <= 1 && !flow); el.classList.toggle('gold', flow || mult >= 3); el.classList.toggle('amber', mult === 2 && !flow);
+  }
+  if (meter !== rideHud.meter) { rideHud.meter = meter; $('hudMeter').firstElementChild.style.transform = 'scaleX(' + meter + ')'; }
+}
 let raceHtml = '';
 function updateRaceHud() {
   const el = $('hudRace');
@@ -4755,6 +5017,7 @@ function finishRun() {
   if (G.mode === 'daily' && G.dayKey && dailySeed(G.dayKey) === G.seed) T.daily[G.dayKey] = Math.max(T.daily[G.dayKey] || 0, sim.score);
   if (G.mode === 'river' && G.riverName && riverSeed(G.riverName) === G.seed) T.rivers[G.riverName] = Math.max(T.rivers[G.riverName] || 0, sim.score);
   const st = REC.stats;
+  if (G.ctrl === CTRL.ride) { st.rideRuns = (st.rideRuns || 0) + 1; st.rideTired = (st.rideTired || 0) + sim.tiredCount; st.rideBestStreak = Math.max(st.rideBestStreak || 0, sim.bestStreak); }
   st.runs++; st.gates += sim.gatesPassed; st.stars += sim.starsGot; st.strokes += sim.strokes; st.dist += Math.round(sim.x / 10); st.time += sim.deathTick / TICK_RATE;
   if (G.challenge) {
     const ch = G.challenge;
@@ -4779,11 +5042,18 @@ function showOver() {
   $('ovLabel').textContent = `${G.label} · ${levelName(G.level)}`;
   $('ovGates').textContent = sim.gatesPassed;
   $('ovStars').textContent = sim.starsGot;
-  $('ovDist').textContent = Math.round(sim.x / 10) + ' m';
-  $('ovTime').textContent = secs(sim.deathTick / TICK_RATE);
+  const ride = G.ctrl === CTRL.ride;
+  $('ovL3').textContent = ride ? 'Nejdelší série' : 'Vzdálenost';
+  $('ovL4').textContent = ride ? 'Síla došla' : 'Čas';
+  $('ovDist').textContent = ride ? sim.bestStreak : Math.round(sim.x / 10) + ' m';
+  $('ovTime').textContent = ride ? sim.tiredCount + '×' : secs(sim.deathTick / TICK_RATE);
+  $('ovTip').hidden = !ride;
+  if (ride) $('ovTip').textContent = (sim.nears ? `Těsně ${sim.nears}× · ` : '') + (sim.tiredCount ? 'Tip: pusť dřív, než bar zčervená — série ti zůstane.'
+    : sim.bestStreak < 5 ? 'Tip: opačný záběr loď zastaví — nemusíš čekat.'
+    : sim.flowOn || sim.bestStreak >= 15 ? 'Tip: v klidné vodě se síla vrací třikrát rychleji.' : 'Tip: krátké rytmické záběry šetří sílu, dlouhé držení je sprint.');
   const best = Math.max(bestFor(G.mode, G.seed), sim.score);
   const pz = G.pauses ? ` · pauzy: ${G.pauses}` : '';
-  $('ovBest').textContent = (G.mode === 'free' && !G.challenge ? `Nejlepší volná plavba: ${best}` : `Tvůj rekord na této řece: ${best}`) + pz;
+  $('ovBest').textContent = (G.mode === 'free' && !G.challenge ? `${ride ? 'Nejlepší volná jízda' : 'Nejlepší volná plavba'}: ${best}` : `Tvůj rekord na této řece: ${best}`) + pz;
   const res = $('ovChallenge');
   if (G.challenge) {
     const ch = G.challenge, t = ch.score, m = sim.score, n = escapeHtml(ch.name || 'Soupeř');
@@ -4875,16 +5145,17 @@ function clearHash() { if (location.hash) { try { history.replaceState(null, '',
 // ─── Input ─────────────────────────────────────────────────────────────────
 // Free ride: every device adds or removes a "source" for a direction; the state is the union,
 // so two keys or a key + mouse button never fight and nothing gets stuck.
-const held = { up: new Set(), down: new Set(), power: new Set() };
-const rideState = () => (held.up.size ? RIDE_UP : 0) | (held.down.size ? RIDE_DOWN : 0) | (held.power.size ? RIDE_POWER : 0);
+const held = { up: new Set(), down: new Set() };
+let heldLast = 0;   // the direction pressed most recently wins while both are held
+const rideState = () => held.up.size && held.down.size ? heldLast : held.up.size ? RIDE_UP : held.down.size ? RIDE_DOWN : 0;
 const rideActive = () => G.ctrl === CTRL.ride && (G.state === 'play' || G.state === 'ready');
 function setHeld(kind, src, on, ts) {
   const set = held[kind];
-  if (on === set.has(src)) return;
-  if (on) set.add(src); else set.delete(src);
+  if (!set || on === set.has(src)) return;
+  if (on) { set.add(src); heldLast = kind === 'up' ? RIDE_UP : RIDE_DOWN; } else set.delete(src);
   rideInput(ts);
 }
-function clearHeld() { held.up.clear(); held.down.clear(); held.power.clear(); }
+function clearHeld() { held.up.clear(); held.down.clear(); heldLast = 0; }
 function rideInput(ts) {
   if (G.ctrl !== CTRL.ride || !G.sim) return;
   const now = performance.now();
@@ -4894,15 +5165,19 @@ function rideInput(ts) {
   if (G.state !== 'play') return;
   let tick = Math.ceil((ts - G.t0) / TICK_MS - 1e-6);
   if (tick < G.sim.tick) tick = G.sim.tick;
-  const q = G.rideQ;
-  if (q.length && q[q.length - 1][0] >= tick) q[q.length - 1][1] = st; else q.push([tick, st]);
+  const q = G.rideQ, last = q[q.length - 1];
+  if (last && last[0] >= tick) {
+    // same tick as the previous change: a release never swallows a press — the press lasts one tick
+    if (st === 0 && last[1] !== 0) q.push([last[0] + 1, 0]); else last[1] = st;
+  } else q.push([tick, st]);
 }
 function ridePointer(e) {
   if (!rideActive()) return;
   if (e.pointerType === 'mouse') {
     // read the whole button mask: a second button pressed while one is held only fires pointermove
-    const b = e.buttons | 0;
-    setHeld('up', 'mL', !!(b & 1), e.timeStamp); setHeld('down', 'mR', !!(b & 2), e.timeStamp); setHeld('power', 'mM', !!(b & 4), e.timeStamp);
+    let b = e.buttons | 0;
+    if (e.ctrlKey && (b & 1)) b = (b & ~1) | 2;   // ctrl + click = right button (one-button Macs)
+    setHeld('up', 'mL', !!(b & 1), e.timeStamp); setHeld('down', 'mR', !!(b & 2), e.timeStamp);
     return;
   }
   const id = 'p' + e.pointerId;
@@ -4914,16 +5189,17 @@ function ridePointer(e) {
 }
 for (const el of [cv, $('tapLayer')]) el.addEventListener('pointerdown', e => { if (!rideActive()) return; e.preventDefault(); try { el.setPointerCapture(e.pointerId); } catch { /* ignore */ } ridePointer(e); }, { passive: false });
 for (const t of ['pointermove', 'pointerup', 'pointercancel']) window.addEventListener(t, ridePointer);
-const RIDE_KEYS = { ArrowUp: 'up', KeyW: 'up', ArrowDown: 'down', KeyS: 'down', Space: 'power', ShiftLeft: 'power', ShiftRight: 'power' };
+const RIDE_KEYS = { ArrowUp: 'up', KeyW: 'up', ArrowDown: 'down', KeyS: 'down' };
 window.addEventListener('keyup', e => { const k = RIDE_KEYS[e.code]; if (k && G.ctrl === CTRL.ride) setHeld(k, 'k' + e.code, false, e.timeStamp); });
 window.addEventListener('blur', () => { clearHeld(); rideInput(); });
+document.addEventListener('visibilitychange', () => { if (document.hidden) { clearHeld(); rideInput(); } });
 
 function press(ts) {
   const now = performance.now();
   if (!(ts > 0) || Math.abs(ts - now) > 1000) ts = now;   // old WebViews report epoch timestamps
   unlockAudio();
   if (G.state === 'ready') { beginPlay(ts); return; }
-  if (G.state === 'play') queueTap(ts);
+  if (G.state === 'play' && G.ctrl !== CTRL.ride) queueTap(ts);
 }
 cv.addEventListener('pointerdown', e => {
   if (rideActive()) return;
@@ -4980,7 +5256,10 @@ function pollGamepads() {
     const ts = gp.timestamp > 0 && gp.timestamp <= now && now - gp.timestamp < 50 ? gp.timestamp : now;
     if (rideActive()) {
       const ay = gp.axes && gp.axes.length > 1 ? gp.axes[1] : 0, src = 'g' + gp.index;
-      setHeld('up', src, ay < -0.35 || !!cur[12], ts); setHeld('down', src, ay > 0.35 || !!cur[13], ts); setHeld('power', src, !!(cur[0] || cur[7]), ts);
+      // stick with hysteresis (in at 0.5, out at 0.35), d-pad, LB/LT = up and RB/RT = down like the mouse
+      const wasU = held.up.has(src), wasD = held.down.has(src);
+      setHeld('up', src, (wasU ? ay < -0.35 : ay < -0.5) || !!(cur[12] || cur[4] || cur[6]), ts);
+      setHeld('down', src, (wasD ? ay > 0.35 : ay > 0.5) || !!(cur[13] || cur[5] || cur[7]), ts);
       if (edge(9)) pause();
       continue;
     }
@@ -5003,6 +5282,7 @@ function pollGamepads() {
 // ─── UI ────────────────────────────────────────────────────────────────────
 let currentScreen = 'scrMenu';
 const coarse = (() => { try { return matchMedia('(pointer: coarse)').matches; } catch { return false; } })();
+if (coarse) document.body.classList.add('coarse');
 function showScreen(id) {
   document.querySelectorAll('.screen').forEach(s => { const on = s.id === id; s.classList.toggle('show', on); s.setAttribute('aria-hidden', on ? 'false' : 'true'); });
   currentScreen = id;
@@ -5178,7 +5458,7 @@ function renderRecords() {
   rows.push(`<div class="levels ctrls" role="radiogroup" aria-label="Režim">${[[CTRL.tap, 'Plavba'], [CTRL.ride, 'Volná jízda']].map(([v, n]) => `<button class="lvl${v === recCtrl ? ' on' : ''}" role="radio" aria-checked="${v === recCtrl}" data-action="rec-ctrl" data-ctrl="${v}">${n}</button>`).join('')}</div>`);
   rows.push(`<div class="levels" role="radiogroup" aria-label="Obtížnost">${[0, 1, 2].map(i => `<button class="lvl${i === S.level ? ' on' : ''}" role="radio" aria-checked="${i === S.level}" data-action="set-level" data-level="${i}">${levelName(i)}</button>`).join('')}</div>`);
   rows.push(`<div class="rec-grid">
-    <div><small>Volná plavba</small><b>${T.free.best || 0}</b>${T.free.code ? `<button class="mini" data-action="share-code" data-code="${T.free.code}">Vyzvat</button>` : ''}</div>
+    <div><small>${recCtrl === CTRL.ride ? 'Volná jízda' : 'Volná plavba'}</small><b>${T.free.best || 0}</b>${T.free.code ? `<button class="mini" data-action="share-code" data-code="${T.free.code}">Vyzvat</button>` : ''}</div>
     <div><small>Dnešní denní výzva</small><b>${T.daily[dk] || 0}</b>${T.seeds[dailyHex] && T.seeds[dailyHex].code ? `<button class="mini" data-action="share-seed" data-seed="${dailyHex}">Vyzvat</button>` : ''}</div>
     <div><small>Jízd celkem</small><b>${st.runs}</b></div>
     <div><small>Branek / hvězd</small><b>${st.gates} / ${st.stars}</b></div>
@@ -5244,7 +5524,7 @@ document.addEventListener('click', e => {
     case 'share-seed': { const rec = LR(S.level, recCtrl).seeds[btn.dataset.seed]; if (rec && rec.code) { try { const r = Replay.decode(rec.code); openShare(Object.assign(r, { code: rec.code })); } catch (err) { toast(err.message || 'Záznam je poškozený'); } } else toast('Na této řece zatím nemáš jízdu'); break; }
     case 'replay-challenge': openChallengeScreen(btn.dataset.code, 'scrRecords'); break;
     case 'reset-records':
-      if (confirm('Opravdu smazat všechny rekordy a historii výzev?')) { for (const k of Object.keys(REC)) delete REC[k]; Object.assign(REC, { L: [blankLevelRec(), blankLevelRec(), blankLevelRec()], R: [blankLevelRec(), blankLevelRec(), blankLevelRec()], challenges: [], stats: { runs: 0, gates: 0, stars: 0, strokes: 0, dist: 0, time: 0 } }); saveRecords(); renderRecords(); toast('Rekordy smazány'); }
+      if (confirm('Opravdu smazat všechny rekordy a historii výzev?')) { for (const k of Object.keys(REC)) delete REC[k]; Object.assign(REC, { L: [blankLevelRec(), blankLevelRec(), blankLevelRec()], R: [blankLevelRec(), blankLevelRec(), blankLevelRec()], rideRules: RIDE_RULES, challenges: [], stats: { runs: 0, gates: 0, stars: 0, strokes: 0, dist: 0, time: 0 } }); saveRecords(); renderRecords(); toast('Rekordy smazány'); }
       break;
   }
 });
@@ -5272,7 +5552,7 @@ function syncSettingsUI() {
   $('setSfx').value = S.sfx; $('setMusic').value = S.music; $('setAmb').value = S.amb;
   $('setGhosts').checked = S.ghosts; $('setShake').checked = S.shake; $('setHaptics').checked = S.haptics; $('setHitbox').checked = S.hitbox;
   $('setQuality').value = S.quality; $('setRes').value = RES_STEPS.includes(S.res) ? S.res : 'auto'; $('setName').value = S.name;
-  $('setFrame').value = FRAMES[S.frame] ? S.frame : 'full'; $('setFps').checked = S.fps; $('setWater').checked = !!water;
+  $('setFrame').value = FRAMES[S.frame] ? S.frame : 'full'; $('setFps').checked = S.fps; $('setWater').checked = !!water; $('setCoast').value = ['auto', 'on', 'off'].includes(S.coast) ? S.coast : 'auto';
 }
 ['setSfx', 'setMusic', 'setAmb'].forEach(id => $(id).addEventListener('input', e => {
   const k = { setSfx: 'sfx', setMusic: 'music', setAmb: 'amb' }[id];
@@ -5301,6 +5581,7 @@ function setWater3d(on) {
   layout(true);
 }
 $('setWater').addEventListener('change', e => { S.water3d = e.target.checked; saveSettings(); A.ui('toggle'); setWater3d(S.water3d); });
+$('setCoast').addEventListener('change', e => { S.coast = e.target.value; saveSettings(); });
 $('setFrame').addEventListener('change', e => { S.frame = e.target.value; saveSettings(); layout(true); });
 $('setFps').addEventListener('change', e => { S.fps = e.target.checked; saveSettings(); A.ui('toggle'); applyFps(); });
 $('setName').addEventListener('input', e => { S.name = e.target.value.slice(0, 16); saveSettings(); $('nameInput').value = S.name; });
@@ -5382,7 +5663,9 @@ function tickFrame(now) {
     const b = biomeMix(course, V.camX + V.visW / 2);
     const night = BIOMES[b.a].night + (BIOMES[b.b].night - BIOMES[b.a].night) * b.t;
     const sim = G.state === 'menu' ? G.attract.sim : G.sim;
-    A.setScene({ biome: b.t > 0.5 ? b.b : b.a, night, intensity: sim ? course.difficultyAt(sim.x) : 0, speed: sim ? clamp((sim.vx - 232) / 110, 0, 1) : 0 });
+    let intensity = sim ? course.difficultyAt(sim.x) : 0;
+    if (sim && G.ctrl === CTRL.ride && G.state !== 'menu' && sim.tempo !== undefined) { G.tempoS = (G.tempoS || 0) + (sim.tempo - (G.tempoS || 0)) * Math.min(1, dt * 4); intensity = Math.max(intensity, 0.15 + 0.25 * G.tempoS + 0.2 * ((sim.mult || 1) - 1)); }
+    A.setScene({ biome: b.t > 0.5 ? b.b : b.a, night, intensity, speed: sim ? clamp((sim.vx - 232) / 110, 0, 1) : 0 });
   }
   render(now, paused ? 0 : dt);
   lastFrameMs = performance.now() - t0;
