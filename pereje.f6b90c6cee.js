@@ -4251,11 +4251,12 @@ function render(now, dt) {
       let gx, gy, gvy;
       if (G.state === 'ready' || (G.state === 'paused' && G.prevState === 'ready')) { gx = 0; gy = RIVER_H / 2 + Math.sin(VT * 2.2 + 1) * 4; gvy = 0; }
       else { const r = boatRenderState(gs, alpha); gx = r.x; gy = r.y; gvy = r.vy; }
-      let ga = 0.55;
-      if (!gs.alive) ga = Math.max(0, 0.55 - (G.sim.tick - gs.deathTick) / 120 * 0.55);
+      const ga0 = gh.live ? 0.32 : 0.55;   // racers stay in the background so they never distract
+      let ga = gh.left ? 0 : ga0;
+      if (!gs.alive) ga = gh.live ? Math.max(0, ga0 * (1 - (VT - (gh.diedAt || VT)))) : Math.max(0, ga0 - (G.sim.tick - gs.deathTick) / 120 * ga0);
       if (ga <= 0.01) continue;
       drawGhost(c, gx, gy, boatAngle(gs.vx, gvy), paddlePose(gh.pad, VT), gh.style, ga, night);
-      labels.push({ x: gx, y: gy - 24, text: gh.name, col: gh.style === 'pb' ? '#efe0ff' : '#dff7ff', a: Math.min(1, ga * 1.8) });
+      labels.push({ x: gx, y: gy - 24, text: gh.name, col: gh.col || (gh.style === 'pb' ? '#efe0ff' : '#dff7ff'), a: Math.min(1, ga * (gh.live ? 2.4 : 1.8)) });
     }
   }
 
@@ -4806,6 +4807,7 @@ function modeLabel(mode, extra) {
 function prepareRun(opt) {
   // opt: { mode, seed, label, challenge, level }
   G.mode = opt.mode; G.seed = opt.seed >>> 0; G.label = opt.label; G.challenge = opt.challenge || null;
+  G.mp = opt.mode === 'mp';
   G.level = levelOf(G.challenge ? G.challenge.level : opt.level ?? S.level).id;
   G.ctrl = (G.challenge ? G.challenge.ctrl : opt.ctrl) === CTRL.ride ? CTRL.ride : CTRL.tap;
   G.course = new Course(G.seed, G.level);
@@ -4814,7 +4816,8 @@ function prepareRun(opt) {
   G.flipWarned = -1; G.pauses = 0; G.resumeAt = 0; G.pauseAlpha = 1;
   G.ghosts = [];
   ghostTrails.clear();
-  const own = LR(G.level, G.ctrl).seeds[seedHex(G.seed)];
+  const own = G.mp ? null : LR(G.level, G.ctrl).seeds[seedHex(G.seed)];
+  if (G.mp) (opt.racers || []).forEach((p, i) => G.ghosts.push(makeLiveGhost(p, i)));
   if (G.challenge) G.ghosts.push(makeGhost(G.challenge.name || 'Soupeř', G.challenge, 'ghost', G.challenge.score));
   if (own && own.code) { try { const r = Replay.decode(own.code); if (r.seed === G.seed && r.level === G.level && (r.ctrl | 0) === G.ctrl) G.ghosts.push(makeGhost('Tvůj rekord', r, 'pb', r.score)); } catch { /* other rules version */ } }
   G.bestBefore = bestFor(G.mode, G.seed);
@@ -4836,6 +4839,7 @@ function prepareRun(opt) {
   $('tapHint').classList.remove('hidden', 'playing');
   $('tapHint').classList.toggle('first', !!S.tutorial);
   $('tapHint').classList.toggle('ride', G.ctrl === CTRL.ride);
+  if (G.mp) $('tapHint').classList.add('hidden');
   document.body.classList.toggle('ride', G.ctrl === CTRL.ride);
   clearHeld();
   A.setPaused(false);
@@ -4844,6 +4848,36 @@ function prepareRun(opt) {
 }
 
 // rec: a decoded run ({ ctrl, taps } or { ctrl, inputs })
+// a racer on the network: inputs arrive live, the boat is simulated LIVE_DELAY ticks behind real time
+const LIVE_DELAY = 24;
+const MP_COLORS = ['#ffd6a0', '#c8f7a8', '#ffc4e6', '#b9e4ff', '#f3e7a6', '#d7c8ff', '#a8f0e0', '#ffcfb0'];
+function makeLiveGhost(p, i) {
+  const ride = G.ctrl === CTRL.ride;
+  return { live: true, id: p.id, name: p.name, ride, taps: [], inputs: [], ti: 0, ii: 0, st: 0, ack: -1, col: MP_COLORS[i % MP_COLORS.length],
+    sim: ride ? new RideSim(G.course) : new Sim(G.course), style: 'ghost', pad: null, finalScore: 0, done: null, left: false };
+}
+function stepLive(gh) {
+  if (!gh.sim.alive) return;
+  const t = gh.sim.tick;
+  let gt = false;
+  if (gh.ride) { while (gh.ii < gh.inputs.length && gh.inputs[gh.ii][0] <= t) gh.st = gh.inputs[gh.ii++][1]; gt = gh.st; }
+  else while (gh.ti < gh.taps.length && gh.taps[gh.ti] <= t) { if (gh.taps[gh.ti] === t) gt = true; gh.ti++; }
+  gh.sim.step(gt);
+  for (const ev of gh.sim.events) if (ev.type === 'stroke') gh.pad = { side: ev.side || (gh.pad && gh.pad.side ? -gh.pad.side : 1), t: VT, pw: ev.power, dur: ev.iv ? clamp(ev.iv / 120, 0.11, 0.3) : 0.3 };
+  gh.sim.events.length = 0;
+  if (!gh.sim.alive && !gh.diedAt) gh.diedAt = VT;
+}
+// catch up at most a few ticks per call, so a late packet never makes a ghost jump
+// The delay adapts per racer: if their acks keep arriving late, the ghost settles a little further back
+// instead of stopping and lurching; with plenty buffered it creeps closer again.
+function advanceLive(gh, tickNow, maxSteps) {
+  const want = tickNow - LIVE_DELAY - (gh.extra || 0);
+  if (gh.ack < want && gh.sim.alive && !gh.done) gh.extra = Math.min(90, (gh.extra || 0) + 0.5);
+  else if (gh.extra > 0 && gh.ack > want + 12) gh.extra = Math.max(0, gh.extra - 0.02);
+  const lim = Math.min(Math.floor(tickNow - LIVE_DELAY - (gh.extra || 0)), gh.ack);
+  let n = 0;
+  while (gh.sim.alive && gh.sim.tick < lim && n++ < maxSteps) stepLive(gh);
+}
 function makeGhost(name, rec, style, finalScore) {
   const ride = (rec.ctrl | 0) === CTRL.ride;
   return { name, ride, taps: rec.taps || [], inputs: rec.inputs || [], ti: 0, ii: 0, st: 0, sim: ride ? new RideSim(G.course) : new Sim(G.course), style, pad: null, finalScore };
@@ -4864,7 +4898,7 @@ function beginPlay(ts) {
   G.t0 = ts;
   if (S.tutorial) $('tapHint').classList.add('playing'); else $('tapHint').classList.add('hidden');
   if (G.ctrl === CTRL.ride) { G.rideQ.push([0, rideState()]); document.body.classList.remove('rideReady'); }
-  else queueTap(ts);
+  else if (!G.mp) queueTap(ts);
 }
 
 function queueTap(ts) {
@@ -4879,7 +4913,8 @@ function updatePlay(now) {
   let target = Math.floor((now - G.t0) / TICK_MS) + 1;
   // After a hitch, slow time instead of teleporting. Queued strokes move with the clock,
   // so nothing the player did during the hitch is delayed or dropped.
-  if (target - sim.tick > 18) {
+  if (G.mp && target - sim.tick > 240) target = sim.tick + 240;   // race: real time, catch up in chunks
+  else if (!G.mp && target - sim.tick > 18) {
     const shift = target - sim.tick - 18;
     G.t0 += shift * TICK_MS; target = sim.tick + 18;
     let last = -1;
@@ -4893,14 +4928,15 @@ function updatePlay(now) {
       // held input: the newest state queued for this tick holds until the next change
       let st = G.rideSt;
       while (G.rideQ.length && G.rideQ[0][0] <= sim.tick) st = G.rideQ.shift()[1];
-      if (st !== G.rideSt || !G.inputs.length) { G.rideSt = st; if (!G.inputs.length || G.inputs[G.inputs.length - 1][1] !== st) G.inputs.push([sim.tick, st]); }
+      if (st !== G.rideSt || !G.inputs.length) { G.rideSt = st; if (!G.inputs.length || G.inputs[G.inputs.length - 1][1] !== st) { G.inputs.push([sim.tick, st]); if (G.mp) MP.outQ.push([sim.tick, st]); } }
     } else {
       while (G.inputQ.length && G.inputQ[0] <= sim.tick) { G.inputQ.shift(); tap = true; }
-      if (tap) G.taps.push(sim.tick);
+      if (tap) { G.taps.push(sim.tick); if (G.mp) MP.outQ.push([sim.tick]); }
     }
     const tickNow = sim.tick;
     for (const gh of G.ghosts) {
       if (!gh.sim.alive) continue;
+      if (gh.live) { advanceLive(gh, tickNow, 2); continue; }
       let gt = false;
       if (gh.ride) { while (gh.ii < gh.inputs.length && gh.inputs[gh.ii][0] <= tickNow) gh.st = gh.inputs[gh.ii++][1]; gt = gh.st; }
       else while (gh.ti < gh.taps.length && gh.taps[gh.ti] <= tickNow) { if (gh.taps[gh.ti] === tickNow) gt = true; gh.ti++; }
@@ -4973,8 +5009,13 @@ function updateRaceHud() {
   if (!G.sim || !G.ghosts.length || !S.ghosts) { if (raceHtml) { el.innerHTML = raceHtml = ''; } return; }
   let html = '';
   for (const gh of G.ghosts) {
-    const target = gh.finalScore;
     const mine = G.sim.score;
+    if (gh.live) {
+      const sc = gh.done ? gh.done.score : gh.sim.score, cls = mine > sc ? 'ahead' : mine === sc ? 'even' : 'behind';
+      html += `<div class="race ghost ${cls}"><span class="dot"></span><b>${escapeHtml(gh.name)}</b><span>${gh.left ? 'odpojen' : gh.done || !gh.sim.alive ? 'konec · ' + (sc | 0) : sc | 0}</span></div>`;
+      continue;
+    }
+    const target = gh.finalScore;
     const cls = mine > target ? 'ahead' : mine === target ? 'even' : 'behind';
     html += `<div class="race ${gh.style} ${cls}"><span class="dot"></span><b>${escapeHtml(gh.name)}</b><span>${mine > target ? '✓ překonáno' : 'cíl ' + target}</span></div>`;
   }
@@ -5006,6 +5047,15 @@ function finishRun() {
   const code = encodeRun(run);
   run.code = code;
   G.lastRun = run;
+  if (G.mp) {
+    G.newBest = false;
+    const st = REC.stats; st.runs++; st.gates += sim.gatesPassed; st.stars += sim.starsGot; st.strokes += sim.strokes; st.dist += Math.round(sim.x / 10); st.time += sim.deathTick / TICK_RATE;
+    st.mpRaces = (st.mpRaces || 0) + 1;
+    saveRecords();
+    if (MP.ws && MP.ws.readyState === 1) { mpFlush(performance.now(), sim.deathTick, true); mpSend({ k: 'done', t: sim.deathTick, score: sim.score, code }); }
+    else MP.lost = true;
+    return;
+  }
   const hex = seedHex(G.seed), T = LR(G.level, G.ctrl);
   const prev = T.seeds[hex];
   G.newBest = false;
@@ -5064,11 +5114,16 @@ function showOver() {
       : `<b>Prohra ${m} : ${t}</b><span>${n} vede o ${bodu(t - m)}. Duch ukazuje cestu — zkus to znovu.</span>`) + note;
     res.hidden = false;
   } else { res.hidden = true; }
+  if (G.mp) {
+    $('ovBest').textContent = 'Závod · ' + (G.ctrl === CTRL.ride ? 'Volná jízda' : 'Plavba') + ' · ' + levelName(G.level);
+    res.hidden = false; res.className = 'result mp'; renderStandings();
+  }
   const freshRiver = G.mode === 'free' && !G.challenge;
   $('btnSame').hidden = !freshRiver;
+  document.querySelector('#scrOver [data-action="share"]').hidden = !!G.mp;
   $('btnRetry').style.gridColumn = freshRiver ? '' : '1 / -1';
-  $('btnRetry').querySelector('span').textContent = freshRiver ? 'Nová řeka' : 'Znovu';
-  $('ovHint').textContent = (freshRiver ? 'Mezerník = nová řeka' : 'Mezerník = znovu') + ' · Každá jízda je uložená jako ověřitelný záznam.';
+  $('btnRetry').querySelector('span').textContent = G.mp ? 'Do místnosti' : freshRiver ? 'Nová řeka' : 'Znovu';
+  $('ovHint').textContent = G.mp ? 'Skóre ostatních se ověřuje přehráním jejich jízdy.' : (freshRiver ? 'Mezerník = nová řeka' : 'Mezerník = znovu') + ' · Každá jízda je uložená jako ověřitelný záznam.';
   const scr = $('scrOver');
   scr.classList.add('locked');
   setTimeout(() => scr.classList.remove('locked'), OVER_LOCK);
@@ -5081,12 +5136,14 @@ function pickCrashTitle(cause) {
 }
 
 function restart(sameSeed) {
+  if (G.mp) { mpBackToRoom(); return; }
   if (G.mode === 'free' && !sameSeed && !G.challenge) prepareRun({ mode: 'free', seed: newRandomSeed(), label: G.label, level: G.level, ctrl: G.ctrl });
   else prepareRun({ mode: G.mode, seed: G.seed, label: G.label, challenge: G.challenge, level: G.level, ctrl: G.ctrl });
 }
 
 function pause() {
   if (G.state !== 'play' && G.state !== 'ready') return;
+  if (G.mp) { if (!document.hidden) toast('V závodě se nepauzuje — ostatní jedou dál'); return; }
   G.pauseAlpha = renderAlpha(performance.now());
   G.prevState = G.state;
   if (G.state === 'play') G.pauses = (G.pauses | 0) + 1;
@@ -5128,6 +5185,8 @@ function cancelResume() {
 }
 
 function goMenu() {
+  if (MP.ws) mpLeave();
+  G.mp = false;
   setHud(false);
   $('tapHint').classList.add('hidden');
   G.state = 'menu';
@@ -5141,6 +5200,270 @@ function goMenu() {
   showScreen('scrMenu');
 }
 function clearHash() { if (location.hash) { try { history.replaceState(null, '', location.pathname + location.search); } catch { /* file:// in some browsers */ } } }
+
+// ─── Multiplayer race ──────────────────────────────────────────────────────
+// Server: Cloudflare Worker (server/). ?mp=http://127.0.0.1:8788 in the address points the game at a local one.
+const MP_DEFAULT = 'https://pereje-mp.pereje.workers.dev';
+const MP_LOCAL = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/;
+const MP_BASE = (() => {
+  try {
+    const q = new URLSearchParams(location.search).get('mp');
+    if (q && MP_LOCAL.test(q) && /^(localhost|127\.0\.0\.1)$/.test(location.hostname)) return q;
+  } catch { /* ignore */ }
+  return MP_DEFAULT;
+})();
+const MP = { outQ: [], raceGhosts: [], ws: null, code: '', id: '', me: Store.get('mp', null), st: null, off: 0, rtt: 1e9, ackAt: 0, pingAt: 0, results: null, round: 0, pendingCode: '', verified: new Map() };
+const MP_ERR = { auth: 'Přezdívku je potřeba ověřit znovu.', full: 'Závod je plný (max. 8 hráčů).', replaced: 'Připojil ses k závodu z jiného okna.', proto: 'Aktualizuj hru — server mluví novější verzí.',
+  kicked: 'Zakladatel tě ze závodu odebral.', noroom: 'Závod s tímhle kódem neexistuje — zkontroluj kód.', timeout: 'Spojení bylo dlouho potichu — vypadl jsi ze závodu.', server: 'Server závodů má potíže, zkus to za chvíli.', done: 'Výsledek se nepodařilo odeslat.' };
+const mpNow = () => Date.now() + MP.off;
+function mpSend(o) { if (MP.ws && MP.ws.readyState === 1) try { MP.ws.send(JSON.stringify(o)); } catch { /* closing */ } }
+function mpView(v) {
+  document.querySelectorAll('#scrMp .mp-view').forEach(el => el.classList.toggle('on', el.dataset.view === v));
+  MP.view = v;
+  if (!coarse) setTimeout(() => { const el = { reg: $('mpName'), home: document.querySelector('[data-action="mp-create"]'), lobby: $('mpReady') }[v]; if (el && currentScreen === 'scrMp' && MP.view === v) el.focus(); }, 90);
+}
+function mpMsg(id, text, bad) { const el = $(id); el.textContent = text || ''; el.classList.toggle('bad', !!bad); }
+async function mpApi(path, body) {
+  let r;
+  try { r = await fetch(MP_BASE + path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body || {}) }); }
+  catch { throw new Error('Server závodů je teď nedostupný. Jsi online?'); }
+  let j = {}; try { j = await r.json(); } catch { /* ignore */ }
+  return { status: r.status, j };
+}
+function openMp(code) {
+  if (location.protocol === 'file:' && !isNative) {
+    toast('Závod s přáteli funguje ve webové verzi (' + WEB_URL.replace(/^https:\/\//, '') + ') nebo v aplikaci.', 5000);
+    return;
+  }
+  if (code) MP.pendingCode = code;
+  $('mpName').value = (MP.me && MP.me.name) || S.name || '';
+  showScreen('scrMp');
+  if (MP.ws) { mpView('lobby'); renderLobby(); return; }
+  if (MP.me) { $('mpMe').textContent = MP.me.name; mpView('home'); mpMsg('mpHomeMsg', ''); if (MP.pendingCode) { const c = MP.pendingCode; MP.pendingCode = ''; mpJoin(c); } }
+  else { mpView('reg'); mpMsg('mpRegMsg', ''); }
+}
+async function mpRegister() {
+  const name = $('mpName').value.normalize('NFC').replace(/\s+/g, ' ').trim();
+  if (!/^[\p{Script=Latin}\p{Nd} _.\-]{2,16}$/u.test(name) || !/[\p{L}\p{Nd}]/u.test(name)) { mpMsg('mpRegMsg', 'Přezdívka musí mít 2–16 znaků: písmena (i s háčky a čárkami), číslice, mezera, _ . -', true); return; }
+  mpMsg('mpRegMsg', 'Ověřuji…');
+  try {
+    if (MP.me && MP.me.name.toLowerCase() === name.toLowerCase()) {
+      const r = await mpApi('/api/check', { name, token: MP.me.token });
+      if (r.j.ok) { MP.me.name = r.j.name; mpDoneReg(); return; }
+    }
+    const r = await mpApi('/api/register', { name });
+    if (r.status === 409) { mpMsg('mpRegMsg', 'Přezdívka „' + name + '“ je už obsazená — zkus jinou.', true); return; }
+    if (r.status === 429) { mpMsg('mpRegMsg', 'Z této sítě teď vzniklo moc nových přezdívek — zkus to znovu za pár minut.', true); return; }
+    if (!r.j.token) { mpMsg('mpRegMsg', 'Tuhle přezdívku použít nejde.', true); return; }
+    MP.me = { name: r.j.name, token: r.j.token };
+    mpDoneReg();
+  } catch (e) { mpMsg('mpRegMsg', e.message, true); }
+}
+function mpDoneReg() {
+  Store.set('mp', MP.me);
+  S.name = MP.me.name; saveSettings(); $('nameInput').value = S.name;
+  $('mpMe').textContent = MP.me.name;
+  mpView('home'); mpMsg('mpHomeMsg', '');
+  if (MP.pendingCode) { const c = MP.pendingCode; MP.pendingCode = ''; mpJoin(c); }
+}
+async function mpCreate() {
+  mpMsg('mpHomeMsg', 'Zakládám závod…');
+  try { const r = await mpApi('/api/room'); if (!r.j.code) throw new Error('Závod se nepodařilo založit, zkus to znovu.'); mpJoin(r.j.code); }
+  catch (e) { mpMsg('mpHomeMsg', e.message, true); }
+}
+function mpJoin(code) {
+  const raw = String(code || '');
+  const hit = raw.match(/zavod=([A-Za-z]{4})/i) || raw.match(/závodu:?\s*([A-Za-z]{4})/i);
+  code = (hit ? hit[1] : raw).toUpperCase().replace(/[^A-Z]/g, '');
+  if (!/^[ABCDEFGHJKLMNPRSTUVWXYZ]{4}$/.test(code)) { mpMsg('mpHomeMsg', 'Kód závodu má 4 písmena (bez I, O a Q) — nebo vlož celý odkaz.', true); return; }
+  if (!MP.me) { MP.pendingCode = code; openMp(); return; }
+  if (MP.ws) { try { MP.ws.close(); } catch { /* ignore */ } }
+  mpMsg('mpHomeMsg', 'Připojuji…');
+  let ws;
+  try { ws = new WebSocket(MP_BASE.replace(/^http/, 'ws') + '/api/room/' + code); }
+  catch { mpMsg('mpHomeMsg', 'Server závodů je teď nedostupný.', true); return; }
+  MP.ws = ws; MP.code = code; MP.st = null; MP.results = null; MP.rtt = 1e9;
+  clearInterval(MP.hb); clearTimeout(MP.welcomeT);
+  MP.welcomeT = setTimeout(() => { if (ws === MP.ws && !MP.id) { MP.lastErr = 'Server závodů neodpovídá.'; try { ws.close(); } catch { /* ignore */ } } }, 8000);
+  MP.id = '';
+  ws.onopen = () => {
+    MP.hb = setInterval(() => mpSend({ k: 'hb' }), 5000);
+    mpSend({ k: 'hello', proto: 1, name: MP.me.name, token: MP.me.token });
+    for (let i = 0; i < 4; i++) setTimeout(() => mpSend({ k: 'ping', c: Date.now() }), i * 180);
+  };
+  ws.onmessage = e => { let m; try { m = JSON.parse(e.data); } catch { return; } if (ws === MP.ws) mpOnMsg(m); };
+  ws.onclose = () => {
+    if (ws !== MP.ws) return;
+    MP.ws = null;
+    clearInterval(MP.hb); clearTimeout(MP.welcomeT);
+    const msg = MP.lastErr || (MP.id ? 'Spojení se závodem se přerušilo.' : `K závodu ${MP.code} se nepodařilo připojit.`);
+    // mid-race: the others' results will not arrive any more — say so instead of waiting forever
+    if (G.mode === 'mp' && MP.round && !(MP.results && MP.results.round === MP.round) && (G.mp || G.state === 'over')) {
+      MP.lost = true;
+      for (const gh of MP.raceGhosts) if (gh.live && !gh.done) gh.lost = true;
+      if (G.state === 'play' || G.state === 'ready' || G.state === 'dead') toast(msg, 3500);
+      if (G.state === 'ready') { G.mpStart = 0; mpBackToRoom(); }
+      if (G.state === 'over') renderStandings();
+    }
+    $('mpCode').value = MP.code;   // keep the code for "Připojit" again
+    if (MP.needReg) MP.pendingCode = MP.code;
+    if (currentScreen === 'scrMp') {
+      if (MP.needReg) { MP.needReg = false; mpView('reg'); mpMsg('mpRegMsg', MP.lastErr, true); }
+      else { mpView('home'); mpMsg('mpHomeMsg', msg, true); }
+    }
+    MP.lastErr = ''; MP.id = '';
+  };
+}
+function mpLeave() {
+  const ws = MP.ws; MP.ws = null; MP.id = '';
+  clearInterval(MP.hb); clearTimeout(MP.welcomeT);
+  if (ws) { try { ws.send(JSON.stringify({ k: 'leave' })); ws.close(1000); } catch { /* ignore */ } }
+  G.mp = false;
+}
+function mpOnMsg(m) {
+  switch (m.k) {
+    case 'welcome': clearTimeout(MP.welcomeT); MP.id = m.id; mpView('lobby'); $('mpRoom').textContent = MP.code; break;
+    case 'hb': break;
+    case 'err':
+      MP.lastErr = MP_ERR[m.e] || 'Připojení odmítnuto.';
+      if (m.e === 'auth') MP.needReg = true;   // the token stays; confirm or pick a nickname again
+      break;
+    case 'pong': { const rtt = Date.now() - m.c; if (rtt < MP.rtt) { MP.rtt = rtt; MP.off = m.s - m.c - rtt / 2; } break; }
+    case 'state': MP.st = m; if (m.reason === 'rules') MP.rulesAt = performance.now(); renderLobby(); break;
+    case 'running': mpMsg('mpLobbyMsg', 'Právě probíhá závod — přidáš se v dalším kole.'); break;
+    case 'start': mpStart(m); break;
+    case 'in': { const gh = raceGhost(m.id); if (gh && Array.isArray(m.l)) { for (const e of m.l) { if (gh.ride) gh.inputs.push([e[0], e[1] | 0]); else gh.taps.push(e[0]); } if (m.a > gh.ack) gh.ack = m.a; } break; }
+    case 'ack': { const gh = raceGhost(m.id); if (gh && m.t > gh.ack) gh.ack = m.t; break; }
+    case 'done': { const gh = raceGhost(m.id); if (gh) { gh.done = { score: m.score, t: m.t, code: m.code }; gh.ack = Math.max(gh.ack, m.t + 1); } if (G.state === 'over') renderStandings(); break; }
+    case 'left': { const gh = raceGhost(m.id); if (gh && !gh.done) gh.left = true; if (G.state === 'over') renderStandings(); break; }
+    case 'results': MP.results = m; mpVerifyResults(m); if (G.state === 'over' || G.state === 'dead') renderStandings(); break;
+  }
+}
+const raceGhost = id => MP.raceGhosts.find(x => x.live && x.id === id);
+function renderLobby() {
+  const st = MP.st; if (!st) return;
+  const host = st.host === MP.id;
+  $('mpPlayers').innerHTML = st.players.map(p => `<li class="${p.ready ? 'ready' : ''}${p.id === MP.id ? ' me' : ''}"><span class="mark">${p.ready ? '✓' : '·'}</span><b>${escapeHtml(p.name)}</b>${p.id === st.host ? '<em>zakladatel</em>' : ''}${p.id === MP.id ? '<em>ty</em>' : ''}${host && p.id !== MP.id && st.phase === 'lobby' ? `<button class="mini kick" data-action="mp-kick" data-id="${escapeHtml(p.id)}" aria-label="Odebrat ${escapeHtml(p.name)}">×</button>` : ''}<small>${p.st === 'race' ? 'závodí' : p.st === 'wait' ? 'čeká na kolo' : p.ready ? 'připraven' : 'nepřipraven'}</small></li>`).join('');
+  $('mpCtrl').value = String(st.ctrl); $('mpLevel').value = String(st.level);
+  $('mpCtrl').disabled = $('mpLevel').disabled = !host || st.phase !== 'lobby';
+  const me = st.players.find(p => p.id === MP.id), ready = !!(me && me.ready);
+  $('mpReady').classList.toggle('on', ready);
+  $('mpReady').querySelector('span').textContent = ready ? 'Připraven ✓ (zrušit)' : 'Jsem připraven';
+  const n = st.players.length, r = st.players.filter(p => p.ready).length;
+  mpMsg('mpLobbyMsg', st.phase === 'race' ? 'Právě probíhá závod — přidáš se v dalším kole.'
+    : n < 2 ? 'Čekáme na další hráče — pošli jim kód nebo odkaz (Pozvat).'
+    : performance.now() - (MP.rulesAt || -1e9) < 5000 && !ready ? 'Zakladatel změnil pravidla — potvrď připravenost znovu.'
+    : r < n ? `Start, až budou připraveni všichni (${r}/${n}).` : 'Startujeme…');
+  if (MP.results && MP.results.round === st.round && currentScreen === 'scrMp') renderLobbyResults();
+}
+function renderLobbyResults() {
+  const box = $('mpLast');
+  if (!MP.results) { box.hidden = true; return; }
+  box.hidden = false;
+  const list = MP.results.list.slice().sort((a, b) => rankKey(b) - rankKey(a));
+  box.innerHTML = '<b>Poslední závod</b><ol>' + list.map(x => `<li class="${MP.verified.get(x.code) === false ? 'fake' : ''}"><span>${escapeHtml(x.name)}</span><b>${x.left ? 'odpojen' : x.score | 0}</b>${x.left ? '' : verifiedMark(x)}</li>`).join('') + '</ol>';
+}
+// ranking: a score that failed verification counts as nothing; unverified-yet keeps its claimed value
+const rankKey = x => x.left ? -2 : MP.verified.get(x.code) === false ? -1 : (x.score | 0);
+const verifiedMark = x => { const v = MP.verified.get(x.code); return v === undefined ? '' : v ? '<i class="ok" title="ověřeno přehráním">✓</i>' : '<i class="bad" title="záznam nesedí">✗</i>'; };
+const normInputs = list => { const out = []; let ps = 0; for (const [t, s] of list) if (s !== ps) { out.push(t + ':' + s); ps = s; } return out.join(','); };
+function mpVerifyResults(m) {
+  // verify every claimed score by replaying its code (spread over frames, it is CPU work)
+  const seen = new Map();
+  m.list.forEach((x, i) => {
+    if (!x.code || MP.verified.has(x.code)) return;
+    setTimeout(() => {
+      let ok = false;
+      try {
+        const r = Replay.decode(x.code);
+        ok = r.seed === m.seed && r.level === m.level && (r.ctrl | 0) === m.ctrl && r.score === x.score && Replay.verify(r).ok;
+        const sig = (r.ctrl | 0) === CTRL.ride ? normInputs(r.inputs) : r.taps.join(',');
+        const gh = x.id !== MP.id ? raceGhost(x.id) : null;
+        const complete = gh && gh.done && !gh.left && !gh.lost;   // a 'done' after all of their inputs on one socket
+        // without their full live stream, a long run identical to someone else's is a copy
+        if (ok && !complete && x.id !== MP.id && sig.split(',').length >= 3 && seen.has(sig) && seen.get(sig) !== x.id) ok = false;
+        seen.set(sig, seen.get(sig) || x.id);
+        if (ok && complete) {   // must match what this racer actually paddled during the race
+          const live = gh.ride ? normInputs(gh.inputs.filter(q => q[0] < r.endTick)) : gh.taps.filter(t => t < r.endTick).join(',');
+          if (live !== sig) ok = false;
+        }
+      } catch { ok = false; }
+      MP.verified.set(x.code, ok);
+      if (G.state === 'over') renderStandings();
+      if (currentScreen === 'scrMp') renderLobbyResults();
+    }, 60 + i * 40);
+  });
+}
+setInterval(() => {   // hidden tab: rAF stops, timers still tick (throttled) — the boat keeps going, acks keep flowing
+  if (!document.hidden || !G.mp || G.state !== 'play') return;
+  const now = performance.now();
+  updatePlay(now); mpFlush(now, G.sim.tick);
+}, 250);
+function mpStart(m) {
+  MP.round = m.round; MP.results = null; MP.lost = false; MP.outQ = []; MP.ackAt = 0;
+  const racers = m.players.filter(p => p.id !== MP.id);
+  if (!m.players.some(p => p.id === MP.id)) return;   // joined mid-race: wait for the next one
+  prepareRun({ mode: 'mp', seed: m.seed, label: 'Závod', level: m.level, ctrl: m.ctrl, racers });
+  MP.raceGhosts = G.ghosts;   // the round's streams keep filling even after we go back to the room
+  G.mpStart = performance.now() + (m.startAt - mpNow());
+  G.mpCount = 0;
+  A.ui('open');
+}
+// send queued inputs (≤ 64 per message) with the ack, or a bare ack, at most every 50 ms
+function mpFlush(now, tick, force) {
+  if (!force && now - MP.ackAt < 50) return;
+  MP.ackAt = now;
+  if (MP.outQ.length) {
+    const l = MP.outQ.splice(0, 64);
+    mpSend({ k: 'in', l, a: MP.outQ.length ? MP.outQ[0][0] : tick });
+    if (MP.outQ.length) mpFlush(now, tick, true);
+  } else mpSend({ k: 'ack', t: tick });
+}
+function mpTick(now) {
+  if (G.state === 'ready' && G.mpStart) {
+    const left = G.mpStart - now;
+    if (left <= 0) { G.mpCount = 0; showBanner('Jeď!', '', 700, 2); A.countdown(0); beginPlay(G.mpStart); G.mpStart = 0; return; }
+    const n = Math.ceil(left / 1000);
+    if (n !== G.mpCount && n <= 3) { G.mpCount = n; showBanner(String(n), 'Závod začíná', 900, 2); A.countdown(n); }
+    else if (n !== G.mpCount && n > 3) { G.mpCount = n; showBanner('Připrav se', G.ghosts.length + 1 + ' ' + pl(G.ghosts.length + 1, 'hráč', 'hráči', 'hráčů') + ' na startu', 900, 2); }
+    return;
+  }
+  if (G.state === 'play') mpFlush(now, G.sim.tick);
+  // after our crash the others keep racing behind the results card
+  if ((G.state === 'dead' || G.state === 'over') && G.t0) {
+    const tickNow = Math.floor((now - G.t0) / TICK_MS);
+    for (const gh of G.ghosts) if (gh.live) advanceLive(gh, tickNow, 6);
+    if (G.state === 'over' && now - (MP.standAt || 0) > 500) { MP.standAt = now; renderStandings(); }
+  }
+}
+function renderStandings() {
+  if (!G.mp && !(MP.results && G.mode === 'mp')) return;
+  const res = $('ovChallenge');
+  const final = MP.results && MP.results.round === MP.round;
+  let rows;
+  if (final) rows = MP.results.list.map(x => ({ name: x.name, score: x.score | 0, me: x.id === MP.id, done: true, left: x.left, code: x.code }));
+  else {
+    rows = [{ name: (MP.me && MP.me.name) || playerName(), score: G.sim.score, me: true, done: true, code: G.lastRun && G.lastRun.code }];
+    for (const gh of MP.raceGhosts) if (gh.live) rows.push({ name: gh.name, score: (gh.done ? gh.done.score : gh.sim.score) | 0, done: !!gh.done || !gh.sim.alive, left: gh.left, lost: gh.lost, code: gh.done && gh.done.code });
+  }
+  rows.sort((a, b) => rankKey(b) - rankKey(a));
+  const waiting = rows.filter(r => !r.done && !r.left && !r.lost).length;
+  res.innerHTML = `<b>${final ? 'Výsledky závodu' : 'Pořadí'}</b><ol class="mp-standings">` + rows.map((r, i) => `<li class="${r.me ? 'me' : ''}${MP.verified.get(r.code) === false ? ' fake' : ''}"><span>${i + 1}. ${escapeHtml(r.name)}</span><b>${r.left ? 'odpojen' : r.score | 0}</b>${r.left ? '' : r.done ? (r.code ? verifiedMark(r) : '') : r.lost ? '<small>?</small>' : '<small>jede</small>'}</li>`).join('') + '</ol>'
+    + (final ? '' : MP.lost ? '<span>Spojení se přerušilo — výsledky ostatních už nedorazí.</span>' : `<span>${waiting ? 'Čekáme, až dojedou ostatní (' + waiting + ')…' : 'Sčítáme…'}</span>`);
+}
+function mpBackToRoom() {
+  setHud(false);
+  G.state = 'menu'; G.mp = false;
+  startAttract();
+  A.setMusicState('menu');
+  openMp(); if (MP.ws) renderLobbyResults(); else mpMsg('mpHomeMsg', 'Spojení se závodem se přerušilo — připoj se znovu kódem ' + MP.code + '.', true);
+}
+function mpInvite() {
+  const hosted = !isNative && /^https?:/.test(location.protocol) && !/^(localhost|127\.0\.0\.1)$/.test(location.hostname);
+  const link = `${hosted ? location.origin + location.pathname : WEB_URL}#zavod=${MP.code}`;
+  const text = `🛶 PEŘEJE — pojď si se mnou zazávodit! Kód závodu: ${MP.code}\n${link}`;
+  if (Native.canShare()) Native.share(text); else copyText(text);
+}
 
 // ─── Input ─────────────────────────────────────────────────────────────────
 // Free ride: every device adds or removes a "source" for a direction; the state is the union,
@@ -5161,7 +5484,7 @@ function rideInput(ts) {
   const now = performance.now();
   if (!(ts > 0) || Math.abs(ts - now) > 1000) ts = now;
   const st = rideState();
-  if (G.state === 'ready') { if (st & (RIDE_UP | RIDE_DOWN)) { unlockAudio(); beginPlay(ts); } return; }
+  if (G.state === 'ready') { if ((st & (RIDE_UP | RIDE_DOWN)) && !G.mp) { unlockAudio(); beginPlay(ts); } return; }
   if (G.state !== 'play') return;
   let tick = Math.ceil((ts - G.t0) / TICK_MS - 1e-6);
   if (tick < G.sim.tick) tick = G.sim.tick;
@@ -5198,7 +5521,7 @@ function press(ts) {
   const now = performance.now();
   if (!(ts > 0) || Math.abs(ts - now) > 1000) ts = now;   // old WebViews report epoch timestamps
   unlockAudio();
-  if (G.state === 'ready') { beginPlay(ts); return; }
+  if (G.state === 'ready') { if (!G.mp) beginPlay(ts); return; }
   if (G.state === 'play' && G.ctrl !== CTRL.ride) queueTap(ts);
 }
 cv.addEventListener('pointerdown', e => {
@@ -5474,6 +5797,7 @@ function renderRecords() {
 
 function backFrom(id) {
   A.ui('back');
+  if (id === 'scrMp') { if (MP.ws) { mpLeave(); MP.results = null; } MP.pendingCode = ''; clearHash(); showScreen('scrMenu'); return; }
   if (id === 'scrShare') { showScreen(shareReturn || 'scrOver'); return; }
   if (id === 'scrChallenge') {
     clearHash();
@@ -5493,6 +5817,15 @@ document.addEventListener('click', e => {
   if (act !== 'back') A.ui('click');
   switch (act) {
     case 'play-free': prepareRun({ mode: 'free', seed: newRandomSeed(), label: 'Volná plavba' }); break;
+    case 'open-mp': openMp(); break;
+    case 'mp-register': mpRegister(); break;
+    case 'mp-rename': mpView('reg'); $('mpName').value = (MP.me && MP.me.name) || ''; mpMsg('mpRegMsg', 'Nová přezdívka se zaregistruje zvlášť.'); break;
+    case 'mp-create': mpCreate(); break;
+    case 'mp-join': mpJoin($('mpCode').value); break;
+    case 'mp-ready': { const me = MP.st && MP.st.players.find(p => p.id === MP.id); mpSend({ k: 'ready', on: !(me && me.ready) }); A.ui('toggle'); break; }
+    case 'mp-leave': mpLeave(); MP.results = null; openMp(); break;
+    case 'mp-invite': mpInvite(); break;
+    case 'mp-kick': if (confirm('Odebrat hráče ze závodu?')) mpSend({ k: 'kick', id: btn.dataset.id }); break;
     case 'play-ride': prepareRun({ mode: 'free', seed: newRandomSeed(), label: 'Volná jízda', ctrl: CTRL.ride }); break;
     case 'rec-ctrl': recCtrl = +btn.dataset.ctrl === CTRL.ride ? CTRL.ride : CTRL.tap; renderRecords(); break;
     case 'set-level': S.level = levelOf(+btn.dataset.level).id; saveSettings(); refreshMenu(); if (currentScreen === 'scrRecords') renderRecords(); break;
@@ -5581,6 +5914,10 @@ function setWater3d(on) {
   layout(true);
 }
 $('setWater').addEventListener('change', e => { S.water3d = e.target.checked; saveSettings(); A.ui('toggle'); setWater3d(S.water3d); });
+$('mpCtrl').addEventListener('change', e => mpSend({ k: 'set', ctrl: +e.target.value, level: +$('mpLevel').value }));
+$('mpLevel').addEventListener('change', e => mpSend({ k: 'set', ctrl: +$('mpCtrl').value, level: +e.target.value }));
+$('mpName').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); mpRegister(); } });
+$('mpCode').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); mpJoin(e.target.value); } });
 $('setCoast').addEventListener('change', e => { S.coast = e.target.value; saveSettings(); });
 $('setFrame').addEventListener('change', e => { S.frame = e.target.value; saveSettings(); layout(true); });
 $('setFps').addEventListener('change', e => { S.fps = e.target.checked; saveSettings(); A.ui('toggle'); applyFps(); });
@@ -5657,6 +5994,7 @@ function tickFrame(now) {
   if (!paused) VT += dt;
   if (G.state === 'menu') updateAttract(dt);
   else if (G.state === 'play') updatePlay(now);
+  if (G.mp) mpTick(now);
   const course = viewCourse();
   if (!paused) { updateParticles(dt, course); ambient(dt, course); }
   if (course) {
@@ -5686,6 +6024,9 @@ if (softwareGL) setTimeout(() => toast('Prohlížeč kreslí bez grafické karty
 // challenge link?
 const hashCode = (location.hash || '').match(/PRJ1-[A-Za-z0-9_-]+/);
 if (hashCode) openChallengeScreen(hashCode[0], null);
+const raceCode = (location.hash || '').match(/zavod=([A-Za-z]{4})/);
+if (raceCode) openMp(raceCode[1].toUpperCase());
+if (/REPLACE_ME/.test(MP_BASE)) document.querySelector('[data-action="open-mp"]').hidden = true;
 requestAnimationFrame(t => { lastNow = t; frame(t); });
 if (isNative) initNative();
 
@@ -5732,5 +6073,5 @@ function initNative() {
 }
 
 // test hooks (harmless)
-window.__pereje = { G, V, S, REC, resCapPixels, BIOMES, get water() { return water; }, layout, prepareRun, loadChallenge, showOver, Replay, tickFrame, perf };
+window.__pereje = { G, V, S, REC, MP, mpOnMsg, mpStart, renderStandings, resCapPixels, BIOMES, get water() { return water; }, layout, prepareRun, loadChallenge, showOver, Replay, tickFrame, perf };
 })();

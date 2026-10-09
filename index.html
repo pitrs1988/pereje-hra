@@ -8,7 +8,7 @@
 <meta name="description" content="PEŘEJE — říční výzva. Pádluj loďkou mezi skalami, kládami a pilíři mostů, sbírej hvězdy a vyzvi přátele na stejnou řeku.">
 <title>PEŘEJE — říční výzva</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230d3a4a'/%3E%3Cpath d='M6 40c8-6 16 6 26 0s18 6 26 0' stroke='%235fd4ff' stroke-width='5' fill='none' stroke-linecap='round'/%3E%3Cpath d='M14 30c6-6 30-6 36 0c-6 5-30 5-36 0z' fill='%23ff6a3d'/%3E%3Ccircle cx='31' cy='29' r='4' fill='%232f7fd6'/%3E%3C/svg%3E">
-<link rel="stylesheet" href="pereje.656e35e295.css">
+<link rel="stylesheet" href="pereje.f0a310176a.css">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="icon-180.png">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -18,6 +18,7 @@
 </head>
 <body>
 <svg class="sprite" width="0" height="0" aria-hidden="true">
+  <symbol id="i-group" viewBox="0 0 24 24"><circle cx="8" cy="8" r="3.2" fill="currentColor"/><circle cx="16.5" cy="9" r="2.6" fill="currentColor" opacity=".75"/><path d="M2.5 19c.6-3.4 3-5.3 5.5-5.3s4.9 1.9 5.5 5.3zM13.6 14.4c.9-.7 1.9-1 2.9-1 2.2 0 4.2 1.6 4.8 4.6h-6" fill="currentColor"/></symbol>
   <symbol id="i-ride" viewBox="0 0 24 24"><path d="M12 3v18M12 3l-4 4M12 3l4 4M12 21l-4-4M12 21l4-4" stroke="currentColor" stroke-width="2.2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></symbol>
   <symbol id="i-play" viewBox="0 0 24 24"><path d="M8 5.5v13a1 1 0 0 0 1.5.86l10.5-6.5a1 1 0 0 0 0-1.72L9.5 4.64A1 1 0 0 0 8 5.5z" fill="currentColor"/></symbol>
   <symbol id="i-cal" viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="15.5" rx="3" fill="none" stroke="currentColor" stroke-width="2"/><path d="M3.5 10h17M8 3v4M16 3v4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="12" cy="15" r="2" fill="currentColor"/></symbol>
@@ -83,6 +84,7 @@
       <p class="level-info"></p>
       <button class="btn primary" data-action="play-free" data-autofocus><svg><use href="#i-play"/></svg><span>Plout</span><small id="menuBestFree"></small></button>
       <button class="btn ride" data-action="play-ride"><svg><use href="#i-ride"/></svg><span>Volná jízda <em class="new">NOVÉ</em></span><small id="menuBestRide"></small></button>
+      <button class="btn mp" data-action="open-mp"><svg><use href="#i-group"/></svg><span>Závod s přáteli <em class="new">NOVÉ</em></span><small>naživo, až 8 hráčů</small></button>
       <button class="btn" data-action="play-daily"><svg><use href="#i-cal"/></svg><span>Denní výzva</span><small id="menuBestDaily"></small></button>
       <button class="btn" data-action="open-challenge"><svg><use href="#i-duel"/></svg><span>Výzva od kamaráda / vlastní řeka</span></button>
       <div class="row3">
@@ -150,6 +152,40 @@
     <div class="inline">
       <input id="riverInput" maxlength="24" placeholder="Název řeky" spellcheck="false" autocomplete="off">
       <button class="btn primary fit" data-action="play-river"><svg><use href="#i-play"/></svg><span>Plout</span></button>
+    </div>
+  </div>
+</section>
+
+<!-- ═════ MULTIPLAYER RACE ═════ -->
+<section id="scrMp" class="screen" role="dialog" aria-modal="true" aria-labelledby="tMp">
+  <div class="card wide">
+    <div class="titlebar"><button class="iconbtn" data-action="back" aria-label="Zpět"><svg><use href="#i-back"/></svg></button><h2 id="tMp">Závod s přáteli</h2></div>
+    <div class="mp-view" data-view="reg">
+      <p class="muted">Všichni jedou stejnou řeku ve stejnou chvíli a vidí se jako průhlední duchové. Nejdřív si zaber přezdívku — pak ji nikdo jiný nepoužije. Bez e-mailu a hesla, pamatuje si ji tohle zařízení.</p>
+      <label class="name"><span>Přezdívka</span><input id="mpName" maxlength="16" placeholder="2–16 znaků" autocomplete="nickname" spellcheck="false"></label>
+      <p id="mpRegMsg" class="mp-msg" aria-live="polite"></p>
+      <button class="btn primary" data-action="mp-register"><svg><use href="#i-play"/></svg><span>Pokračovat</span></button>
+    </div>
+    <div class="mp-view" data-view="home">
+      <p class="muted">Závodíš jako <b id="mpMe"></b> · <button class="linkbtn" data-action="mp-rename">jiná přezdívka</button></p>
+      <button class="btn primary" data-action="mp-create"><svg><use href="#i-group"/></svg><span>Založit závod</span><small>pozveš až 7 přátel</small></button>
+      <div class="inline">
+        <input id="mpCode" maxlength="200" placeholder="KÓD nebo odkaz" spellcheck="false" autocomplete="off" autocapitalize="characters">
+        <button class="btn fit" data-action="mp-join"><svg><use href="#i-duel"/></svg><span>Připojit</span></button>
+      </div>
+      <p id="mpHomeMsg" class="mp-msg" aria-live="polite"></p>
+    </div>
+    <div class="mp-view" data-view="lobby">
+      <div class="mp-code"><small>Kód závodu</small><b id="mpRoom">----</b><button class="mini" data-action="mp-invite">Pozvat</button></div>
+      <ul id="mpPlayers" class="mp-players"></ul>
+      <div class="mp-settings">
+        <label class="set"><span>Režim</span><select id="mpCtrl"><option value="0">Plavba (ťukání)</option><option value="1">Volná jízda (držení)</option></select></label>
+        <label class="set"><span>Obtížnost</span><select id="mpLevel"><option value="0">Děti</option><option value="1">Normální</option><option value="2">Profi vodák</option></select></label>
+      </div>
+      <p id="mpLobbyMsg" class="mp-msg" aria-live="polite"></p>
+      <button id="mpReady" class="btn primary" data-action="mp-ready"><svg><use href="#i-play"/></svg><span>Jsem připraven</span></button>
+      <div id="mpLast" class="mp-last" hidden></div>
+      <button class="btn" data-action="mp-leave"><svg><use href="#i-home"/></svg><span>Odejít ze závodu</span></button>
     </div>
   </div>
 </section>
@@ -236,6 +272,6 @@
 </div>
 <noscript><p class="noscript">Hra potřebuje JavaScript.</p></noscript>
 
-<script src="pereje.8e008ccebc.js"></script>
+<script src="pereje.f6b90c6cee.js"></script>
 </body>
 </html>

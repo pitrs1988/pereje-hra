@@ -359,3 +359,35 @@ body.ride.coarse.rideReady #tapLayer::before, body.ride.coarse.rideReady #tapLay
 body.ride.coarse.rideReady #tapLayer::before { content: '▲'; top: 0; background: rgba(143, 227, 255, .06); border-bottom: 1px dashed rgba(255, 255, 255, .25); }
 body.ride.coarse.rideReady #tapLayer::after { content: '▼'; bottom: 0; background: rgba(255, 211, 77, .05); animation-delay: .8s; }
 @keyframes zone { 50% { opacity: .35; } }
+
+/* multiplayer race */
+.btn.mp { border-color: rgba(255, 196, 230, .35); }
+.btn.mp svg { color: #ffc4e6; }
+#scrMp .mp-view { display: none; flex-direction: column; gap: 12px; }
+#scrMp .mp-view.on { display: flex; }
+.mp-msg { margin: 0; min-height: 1.2em; font: 500 13px var(--font); color: var(--ink2); }
+.mp-msg.bad { color: #ffb0a0; }
+.linkbtn { background: none; border: 0; padding: 0; color: #8fe3ff; font: inherit; text-decoration: underline; cursor: pointer; }
+#mpCode { text-transform: uppercase; letter-spacing: .3em; font-weight: 700; text-align: center; max-width: 9em; }
+.mp-code { display: flex; align-items: center; gap: 12px; padding: 10px 14px; border-radius: 14px; background: rgba(0, 0, 0, .28); border: 1px solid var(--line); }
+.mp-code small { color: var(--ink2); font: 600 12px var(--font); }
+.mp-code b { font: 800 28px/1 var(--display); letter-spacing: .25em; flex: 1; }
+.mp-players { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.mp-players li { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-radius: 12px; background: rgba(255, 255, 255, .06); border: 1px solid var(--line); }
+.mp-players li.ready { border-color: rgba(127, 227, 160, .5); background: rgba(127, 227, 160, .08); }
+.mp-players li.me b { color: #ffe08a; }
+.mp-players .mark { width: 1.2em; text-align: center; font-weight: 800; color: #7fe3a0; }
+.mp-players em { font: 700 10px var(--font); font-style: normal; text-transform: uppercase; letter-spacing: .05em; color: #062430; background: #8fe3ff; padding: 2px 6px; border-radius: 99px; }
+.mp-players small { margin-left: auto; color: var(--ink2); font: 500 12px var(--font); }
+.mp-settings { display: grid; gap: 4px; }
+#mpReady.on { background: linear-gradient(135deg, #5fd08a, #2fa866); }
+.mp-last { padding: 10px 14px; border-radius: 14px; background: rgba(0, 0, 0, .22); border: 1px solid var(--line); font: 500 14px var(--font); }
+.mp-last ol, .mp-standings { margin: 6px 0 0; padding: 0; list-style: none; display: grid; gap: 4px; }
+.mp-last li, .mp-standings li { display: flex; gap: 8px; align-items: center; }
+.mp-last li b, .mp-standings li b { margin-left: auto; font-variant-numeric: tabular-nums; }
+.mp-standings li.me span { color: #ffe08a; font-weight: 700; }
+.mp-standings small { color: var(--ink2); }
+i.ok { color: #7fe3a0; font-style: normal; } i.bad { color: #ff8f7a; font-style: normal; }
+.result.mp { display: block; text-align: left; }
+.mp-standings li.fake span, .mp-standings li.fake b, .mp-last li.fake span, .mp-last li.fake b { text-decoration: line-through; opacity: .6; }
+.mp-players .kick { min-height: 28px; padding: 2px 9px; margin-left: 4px; }
