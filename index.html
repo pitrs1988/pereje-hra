@@ -8,7 +8,7 @@
 <meta name="description" content="PEŘEJE — říční výzva. Pádluj loďkou mezi skalami, kládami a pilíři mostů, sbírej hvězdy a vyzvi přátele na stejnou řeku.">
 <title>PEŘEJE — říční výzva</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230d3a4a'/%3E%3Cpath d='M6 40c8-6 16 6 26 0s18 6 26 0' stroke='%235fd4ff' stroke-width='5' fill='none' stroke-linecap='round'/%3E%3Cpath d='M14 30c6-6 30-6 36 0c-6 5-30 5-36 0z' fill='%23ff6a3d'/%3E%3Ccircle cx='31' cy='29' r='4' fill='%232f7fd6'/%3E%3C/svg%3E">
-<link rel="stylesheet" href="pereje.43b7cc5e05.css">
+<link rel="stylesheet" href="pereje.9ee864e0cb.css">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="icon-180.png">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -50,7 +50,8 @@
     <div id="hudBest" class="sub"></div>
   </div>
   <div id="hudCenter"><div id="hudScore">0</div>
-  <div id="hudRide"><div id="hudMult" class="dim">×1</div><div id="hudMeter"><i></i></div></div></div>
+  <div id="hudRide"><div id="hudMult" class="dim">×1</div><div id="hudMeter"><i></i></div></div>
+  <div id="hudLives" hidden role="img"></div></div>
   <div id="hudSl"><span id="hudSlGate"></span><span id="hudSlPen"></span><span id="hudSlDelta"></span></div>
   <div class="hud-right">
     <button id="btnPause" class="iconbtn" data-action="pause" aria-label="Pauza (Esc)"><svg><use href="#i-pause"/></svg></button>
@@ -90,6 +91,11 @@
         <button class="lvl" role="radio" data-action="set-ctrl" data-ctrl="0">👆 Ťukání</button>
         <button class="lvl" role="radio" data-action="set-ctrl" data-ctrl="1">✋ Držení</button>
       </div>
+      <div class="levels two" role="radiogroup" aria-label="Varianta">
+        <button class="lvl" role="radio" data-action="set-variant" data-variant="0">Klasika</button>
+        <button class="lvl" role="radio" data-action="set-variant" data-variant="1">❤ Tři životy</button>
+      </div>
+      <p id="variantInfo" class="muted"></p>
       <p class="level-info"></p>
       <button class="btn primary" data-action="play-free" data-autofocus><svg><use href="#i-play"/></svg><span>Plout</span><small id="menuBestFree"></small></button>
       <button class="btn mp" data-action="open-mp"><svg><use href="#i-group"/></svg><span>Závod s přáteli <em class="new">NOVÉ</em></span><small>živě · až 8</small></button>
@@ -288,6 +294,7 @@
       <li><b>Slalom na čas</b> — pevná trať s brankami mezi tyčemi a cílem. Měří se čas s tresty (dotek tyče, vynechaná branka, kámen, břeh); rekordy jsou zvlášť pro každou trať a obtížnost a výzvu pošleš kamarádům i s duchem.</li>
       <li><b>Obtížnost</b> — <b>Děti</b>: pomalejší řeka, široké mezery, bez protiproudu. <b>Normální</b>: klasické peřeje. <b>Profi vodák</b>: rychlá a těsná voda. Rekordy i výzvy se počítají zvlášť pro každou obtížnost; výzva od kamaráda se vždy jede na jeho obtížnost.</li>
       <li><b>Volná jízda</b> — drž levé tlačítko (<kbd>↑</kbd>/<kbd>W</kbd>) a pádluješ nahoru, pravé (<kbd>↓</kbd>/<kbd>S</kbd>) dolů; na telefonu drž horní nebo dolní půlku. Čím déle držíš, tím rychlejší tempo a silnější záběry — ale ubývá síla (proužek pod loďkou). Když pustíš, loď ještě klouže a síla se vrací (v klidné vodě rychleji, hvězdy a těsné průjezdy ji doplní). Opačným záběrem zabrzdíš. Branky bez vyčerpání budují sérii: ×2 po 5, FLOW ×3 po 15 — ve FLOW tě pádlování stojí jen polovinu síly. Když ti síla dojde, série spadne na ×1 a chvíli pádluješ slabě.</li>
+      <li><b>❤ Tři životy</b> — varianta pro Plavbu i Volnou jízdu (přepínač v menu). Náraz tě nezabije: loďka se vrátí doprostřed další mezery, zpomalí a chvíli je nezranitelná (bliká). Po 25 brankách se ztracený život vrátí; třetí náraz je konec. Má vlastní rekordy a výzvy.</li>
       <li><b>Body</b> — každá proplutá branka +1, každá <i class="star">★</i> hvězda +1. Hvězdy bývají na odvážných místech.</li>
       <li><b>Překážky</b>: skály, klády, plovoucí zátarasy s bójkami (pohybují se), mosty se dvěma průjezdy.</li>
       <li><b>Krajiny</b> se střídají každých 20 branek: les za svítání, kaňon, džungle, noční les a ledovec. Rychlost postupně roste.</li>
@@ -309,6 +316,6 @@
 </div>
 <noscript><p class="noscript">Hra potřebuje JavaScript.</p></noscript>
 
-<script src="pereje.005a035764.js"></script>
+<script src="pereje.78966ca079.js"></script>
 </body>
 </html>

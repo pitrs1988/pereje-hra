@@ -451,3 +451,12 @@ html, body { touch-action: manipulation; }
   .menu-wrap .card .name input { padding: 6px 10px; }
 }
 body.goalrace.playing #hudSl { display: flex; }
+/* "Tři životy": hearts under the score */
+#hudLives { position: static; transform: none; display: flex; gap: 3px; pointer-events: none; font-size: clamp(24px, calc(4.2 * var(--vw, 1vw)), 38px); line-height: 1; text-shadow: 0 2px 6px rgba(0, 20, 30, .55); }
+#hudLives[hidden] { display: none; }
+#hudLives i { font-style: normal; color: #ff4d5e; transition: color .25s, opacity .25s, transform .25s; }
+#hudLives i.off { color: #fff; opacity: .28; transform: scale(.8); }
+#hudLives.hit { animation: shake .45s; }
+#hudLives.gain { animation: pop .35s cubic-bezier(.2, .9, .3, 1.5); }
+#variantInfo { min-height: 1.3em; margin: 2px 0 6px; font-size: 13px; text-align: center; }
+#variantInfo:empty { display: none; }

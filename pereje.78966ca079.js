@@ -453,6 +453,13 @@ class Course {
   }
 }
 
+// ─── Variants ──────────────────────────────────────────────────────────────
+// "Tři životy": a crash is not the end — the boat is set back on the next gap, slows down and is untouchable for a
+// moment; the third crash ends the run. Every LIFE_EVERY gates a lost life comes back. Classic runs have lives = 0.
+const VARIANT = { none: 0, lives: 1 };
+const LIVES_RULES = 1;   // bump on ANY change to the lives constants or Sim._hurt
+const LIVES_MAX = 3, LIFE_EVERY = 25, INVUL_TICKS = 150, SLOW_TICKS = 240, SLOW_MIN = 0.4;
+
 // ─── Simulation of one boat ────────────────────────────────────────────────
 class Sim {
   constructor(course) {
@@ -469,7 +476,10 @@ class Sim {
     this.deathTick = -1; this.death = null;
     this.gateClear = 1e9;
     this.events = [];
+    this.lives = 0; this.hits = 0; this.invul = 0; this.slow = 0;   // lives > 0 only in the "Tři životy" variant
   }
+  withLives() { this.lives = LIVES_MAX; return this; }
+  _slowMul() { return this.slow > 0 ? SLOW_MIN + (1 - SLOW_MIN) * (1 - this.slow / SLOW_TICKS) : 1; }
   clone() {
     const s = Object.create(Object.getPrototypeOf(this));   // keeps subclasses (RideSim) intact
     Object.assign(s, this);
@@ -498,19 +508,36 @@ class Sim {
     this.vy += flow * lv.pull * DT;
     if (calm > 0) this.vy -= this.vy * calm * CALM_DAMP * DT;
     if (this.vy > lv.maxDrift) this.vy = lv.maxDrift; else if (this.vy < -lv.maxDrift) this.vy = -lv.maxDrift;
-    this.vx = c.speedAt(this.x);
+    this.vx = c.speedAt(this.x) * this._slowMul();
     this.x += this.vx * DT;
     this.y += this.vy * DT;
     this.tick++;
+    if (this.invul > 0) this.invul--;
+    if (this.slow > 0) this.slow--;
     this._collide();
     if (this.alive) this._progress();
   }
+  _hurt(cause, x, y) {
+    this.lives--; this.hits++; this.invul = INVUL_TICKS; this.slow = SLOW_TICKS; this.vy = 0;
+    if (this.boost !== undefined) { this.boost = 0; this.dk = 8; }
+    // set back on the middle of the nearest gap of the next gate
+    const g = this.c.gates[this.nextGate];
+    if (g) {
+      let best = g.open[0];
+      for (const o of g.open) if (Math.abs(o.cy - this.y) < Math.abs(best.cy - this.y)) best = o;
+      this.y = best.cy + (g.move ? moveOffset(g.move, this.tick) : 0);
+    } else this.y = RIVER_H / 2;
+    this.events.push({ type: 'hit', cause, x, y, lives: this.lives });
+  }
   _die(cause, x, y) {
+    if (this.lives > 1) return this._hurt(cause, x, y);
+    this.lives = 0;
     this.alive = false; this.deathTick = this.tick;
     this.death = { cause, x, y };
     this.events.push({ type: 'crash', cause, x, y });
   }
   _collide() {
+    if (this.invul > 0) return;
     const c = this.c;
     const [hx, hy] = this.heading();
     for (let i = 0; i < 3; i++) {
@@ -547,6 +574,7 @@ class Sim {
       const g = c.gates[this.nextGate];
       this.nextGate++; this.gatesPassed++; this.score++;
       this.events.push({ type: 'gate', n: g.n, near: this.gateClear < 7 });
+      if (this.lives > 0 && this.lives < LIVES_MAX && this.gatesPassed % LIFE_EVERY === 0) { this.lives++; this.events.push({ type: 'life', lives: this.lives }); }
       this.gateClear = 1e9;
     }
     const st = c.stars;
@@ -632,7 +660,9 @@ class RideSim extends Sim {
     const md = c.lv.maxDrift; if (this.vy > md) this.vy = md; else if (this.vy < -md) this.vy = -md;
     // 4) forward motion = the river's own speed x (1 + boost); hitboxes and gates as in Sim
     this.boost -= this.boost * K.bDecay * DT;
-    this.vx = c.speedAt(this.x) * (1 + this.boost); this.x += this.vx * DT; this.y += this.vy * DT; this.tick++;
+    this.vx = c.speedAt(this.x) * (1 + this.boost) * this._slowMul(); this.x += this.vx * DT; this.y += this.vy * DT; this.tick++;
+    if (this.invul > 0) this.invul--;
+    if (this.slow > 0) this.slow--;
     this._collide(); if (this.alive) this._progress();
   }
   _stroke(d, w) {
@@ -873,8 +903,9 @@ function runSlalom(seed, inputs, level = 1, maxTicks = TICK_RATE * 60 * 5) {
 
 
 // Replay a free-ride run headlessly; inputs = [[tick, state], …] (state holds until the next change)
-function runRide(seed, inputs, maxTicks = TICK_RATE * 60 * 45, level = 1) {
+function runRide(seed, inputs, maxTicks = TICK_RATE * 60 * 45, level = 1, variant = 0) {
   const sim = new RideSim(new Course(seed, level, CTRL.ride));
+  if (variant === VARIANT.lives) sim.withLives();
   let ii = 0, st = 0;
   while (sim.alive && sim.tick < maxTicks) {
     while (ii < inputs.length && inputs[ii][0] <= sim.tick) st = inputs[ii++][1] & RIDE_MASK;
@@ -885,8 +916,9 @@ function runRide(seed, inputs, maxTicks = TICK_RATE * 60 * 45, level = 1) {
 }
 
 // Run a replay headlessly. Returns the finished sim.
-function runReplay(seed, taps, maxTicks = TICK_RATE * 60 * 45, level = 1) {
+function runReplay(seed, taps, maxTicks = TICK_RATE * 60 * 45, level = 1, variant = 0) {
   const sim = new Sim(new Course(seed, level));
+  if (variant === VARIANT.lives) sim.withLives();
   let ti = 0;
   while (sim.alive && sim.tick < maxTicks) {
     let tap = false;
@@ -934,9 +966,17 @@ const Replay = {
     const vu = v => { v = Math.max(0, Math.floor(v)); while (v >= 128) { w.push((v & 127) | 128); v = Math.floor(v / 128); } w.push(v); };
     const str = (s, max) => { const b = _te.encode(cleanText(s, max)); vu(b.length); for (const x of b) w.push(x); };
     const slalom = r.ctrl === CTRL.slalom, ride = r.ctrl === CTRL.ride || slalom;
-    w.push(slalom ? 6 : ride ? 5 : 3, RULES, r.mode & 255, levelOf(r.level).id);
-    if (ride) w.push(slalom ? CTRL.slalom : CTRL.ride, RIDE_RULES);
-    if (slalom) w.push(SLALOM_RULES);
+    const variant = slalom ? 0 : r.variant | 0;
+    if (variant < 0 || variant > VARIANT.lives) throw new Error('unknown variant');
+    if (variant) {   // version 7: control scheme and variant are explicit
+      w.push(7, RULES, r.mode & 255, levelOf(r.level).id, r.ctrl);
+      if (ride) w.push(RIDE_RULES);
+      w.push(LIVES_RULES, variant);
+    } else {
+      w.push(slalom ? 6 : ride ? 5 : 3, RULES, r.mode & 255, levelOf(r.level).id);
+      if (ride) w.push(slalom ? CTRL.slalom : CTRL.ride, RIDE_RULES);
+      if (slalom) w.push(SLALOM_RULES);
+    }
     const sd = r.seed >>> 0; w.push(sd & 255, (sd >>> 8) & 255, (sd >>> 16) & 255, sd >>> 24);
     vu(r.score); vu(r.endTick); vu(r.pauses | 0);
     str(r.name, 16); str(r.label, 32);
@@ -980,7 +1020,7 @@ const Replay = {
     const vu = () => { let v = 0, mul = 1; for (let i = 0; i < 6; i++) { const x = u8(); v += (x & 127) * mul; if (!(x & 128)) return v; mul *= 128; } throw bad(); };
     const str = n => { const l = vu(); if (l > 200) throw bad(); need(l); const s = _td.decode(b.subarray(p, p + l)); p += l; return cleanText(s, n); };
     const ver = u8();
-    if (ver < 1 || ver > 6) throw new Error('Kód je z novější verze hry.');
+    if (ver < 1 || ver > 7) throw new Error('Kód je z novější verze hry.');
     const rules = ver === 1 ? 1 : u8();
     if (rules !== RULES) throw new Error('Kód je ze starší verze pravidel hry — přehrát ho nejde.');
     const mode = u8();
@@ -989,8 +1029,15 @@ const Replay = {
     const ctrl = ver >= 4 ? u8() : CTRL.tap;
     if (ctrl > CTRL.slalom) throw new Error('Kód je z novější verze hry.');
     if (ver === 6 && ctrl !== CTRL.slalom) throw bad();
-    if (ctrl === CTRL.ride && (ver !== 5 || u8() !== RIDE_RULES)) throw new Error('Kód je ze starší verze Volné jízdy — přehrát ho nejde.');
+    if (ver === 7 && ctrl === CTRL.slalom) throw bad();
+    if (ctrl === CTRL.ride && ((ver !== 5 && ver !== 7) || u8() !== RIDE_RULES)) throw new Error('Kód je ze starší verze Volné jízdy — přehrát ho nejde.');
     if (ctrl === CTRL.slalom && (ver !== 6 || u8() !== RIDE_RULES || u8() !== SLALOM_RULES)) throw new Error('Kód je ze starší verze Slalomu — přehrát ho nejde.');
+    let variant = 0;
+    if (ver === 7) {
+      if (u8() !== LIVES_RULES) throw new Error('Kód je ze starší verze pravidel Tří životů — přehrát ho nejde.');
+      variant = u8();
+      if (variant !== VARIANT.lives) throw new Error('Kód je z novější verze hry.');
+    }
     need(4);
     const seed = (b[p] | (b[p + 1] << 8) | (b[p + 2] << 16) | (b[p + 3] << 24)) >>> 0; p += 4;
     const score = vu(), endTick = vu();
@@ -1009,12 +1056,12 @@ const Replay = {
         inputs[i] = [prev, ns]; ps = ns;
       }
       if (n && prev >= endTick) throw bad();
-      return { mode, level, ctrl, seed, score, endTick, name, label, taps: [], inputs, pauses, rules };
+      return { mode, level, ctrl, seed, score, endTick, name, label, taps: [], inputs, pauses, rules, variant };
     }
     const taps = new Array(n);
     for (let i = 0; i < n; i++) { prev = prev + 1 + vu(); taps[i] = prev; }
     if (n && taps[n - 1] >= endTick) throw bad();
-    return { mode, level, ctrl, seed, score, endTick, name, label, taps, pauses, rules };
+    return { mode, level, ctrl, seed, score, endTick, name, label, taps, pauses, rules, variant };
   },
   // A genuine run dies exactly at endTick with exactly the claimed score.
   // A race run that stopped ALIVE on the finish line: replaying must reach `goal` gates exactly at endTick, with
@@ -1023,6 +1070,7 @@ const Replay = {
     if (r.ctrl === CTRL.slalom) return this.verify(r);
     const ride = r.ctrl === CTRL.ride;
     const sim = ride ? new RideSim(new Course(r.seed, r.level, CTRL.ride)) : new Sim(new Course(r.seed, r.level));
+    if (r.variant === VARIANT.lives) sim.withLives();
     let ii = 0, ti = 0, st = 0;
     while (sim.alive && sim.tick < r.endTick && sim.gatesPassed < goal) {
       let tap = false;
@@ -1037,7 +1085,7 @@ const Replay = {
       const sm = runSlalom(r.seed, r.inputs, r.level, r.endTick);
       return { ok: sm.finished && sm.finishTick === r.endTick && sm.score === r.score, score: sm.score, endTick: sm.finishTick, sim: sm };
     }
-    const sim = r.ctrl === CTRL.ride ? runRide(r.seed, r.inputs, r.endTick, r.level) : runReplay(r.seed, r.taps, r.endTick, r.level);
+    const sim = r.ctrl === CTRL.ride ? runRide(r.seed, r.inputs, r.endTick, r.level, r.variant | 0) : runReplay(r.seed, r.taps, r.endTick, r.level, r.variant | 0);
     return { ok: !sim.alive && sim.score === r.score && sim.deathTick === r.endTick, score: sim.score, endTick: sim.deathTick, sim };
   },
 };
@@ -3319,15 +3367,17 @@ const Store = {
   },
 };
 const reducedMotion = (() => { try { return matchMedia('(prefers-reduced-motion: reduce)').matches; } catch { return false; } })();
-const DEFAULTS = { name: '', sfx: 0.8, music: 0.5, amb: 0.7, ghosts: true, shake: !reducedMotion, haptics: true, hitbox: false, quality: 'auto', muted: false, ctrl: 0, res: 'auto', frame: isNative ? 'full' : '1280', fps: false, water3d: false, coast: 'auto', rideTut: 0, tutorial: true, level: 1 };
+const DEFAULTS = { name: '', sfx: 0.8, music: 0.5, amb: 0.7, ghosts: true, shake: !reducedMotion, haptics: true, hitbox: false, quality: 'auto', muted: false, ctrl: 0, res: 'auto', frame: isNative ? 'full' : '1280', fps: false, water3d: false, coast: 'auto', variant: 0, rideTut: 0, tutorial: true, level: 1 };
 const freshInstall = !Store.get('settings', null) && !Store.get('records2', null);
 const S = Object.assign({}, DEFAULTS, Store.get('settings', {}));
 if (freshInstall) S.level = 0;
 const saveSettings = () => Store.set('settings', S);
 // Records are kept per difficulty level: a kids' score never competes with a pro's.
 const blankLevelRec = () => ({ free: { best: 0 }, seeds: {}, daily: {}, rivers: {} });
-const REC = Object.assign({ L: [], R: [], S: [], challenges: [], stats: { runs: 0, gates: 0, stars: 0, strokes: 0, dist: 0, time: 0 } }, Store.get('records2', {}));
-for (let i = 0; i < 3; i++) { REC.L[i] = Object.assign(blankLevelRec(), REC.L[i] || {}); REC.R[i] = Object.assign(blankLevelRec(), REC.R[i] || {}); REC.S[i] = Object.assign(blankLevelRec(), REC.S[i] || {}); }
+const REC = Object.assign({ L: [], R: [], S: [], H: [], HR: [], challenges: [], stats: { runs: 0, gates: 0, stars: 0, strokes: 0, dist: 0, time: 0 } }, Store.get('records2', {}));
+for (let i = 0; i < 3; i++) { REC.L[i] = Object.assign(blankLevelRec(), REC.L[i] || {}); REC.R[i] = Object.assign(blankLevelRec(), REC.R[i] || {}); REC.S[i] = Object.assign(blankLevelRec(), REC.S[i] || {}); REC.H[i] = Object.assign(blankLevelRec(), REC.H[i] || {}); REC.HR[i] = Object.assign(blankLevelRec(), REC.HR[i] || {}); }
+// "Tři životy" tables (tap = H, free ride = HR) depend on the lives rules and on the ride rules
+if (REC.livesKey !== LIVES_RULES + ':' + RIDE_RULES) { for (let i = 0; i < 3; i++) { REC.H[i] = blankLevelRec(); REC.HR[i] = blankLevelRec(); } REC.challenges = REC.challenges.filter(h => !h.variant); REC.livesKey = LIVES_RULES + ':' + RIDE_RULES; }
 // slalom times depend on both rule sets: a change in either starts that table afresh
 if (REC.slalomKey !== RIDE_RULES + ':' + SLALOM_RULES) { for (let i = 0; i < 3; i++) REC.S[i] = blankLevelRec(); REC.challenges = REC.challenges.filter(h => (h.ctrl | 0) !== CTRL.slalom); REC.slalomKey = RIDE_RULES + ':' + SLALOM_RULES; }
 // free-ride records from other ride rules (e.g. the unreleased placeholder) cannot be replayed: start clean
@@ -3335,17 +3385,18 @@ if (REC.rideRules !== RIDE_RULES) { for (let i = 0; i < 3; i++) REC.R[i] = blank
 // Old (rules v1) records cannot be verified under the new physics; only the lifetime stats carry over.
 if (!Store.get('records2', null)) { const old = Store.get('records', null); if (old && old.stats) Object.assign(REC.stats, old.stats); }
 // records per level and control scheme (classic taps / free ride)
-const LR = (lv, ctrl) => (ctrl === CTRL.slalom ? REC.S : ctrl === CTRL.ride ? REC.R : REC.L)[lv === 0 || lv === 2 ? lv : 1];
+const LR = (lv, ctrl, variant) => (ctrl === CTRL.slalom ? REC.S : variant ? (ctrl === CTRL.ride ? REC.HR : REC.H) : ctrl === CTRL.ride ? REC.R : REC.L)[lv === 0 || lv === 2 ? lv : 1];
+const VARIANT_NAME = 'Tři životy';
 const levelName = lv => levelOf(lv).name;
 const seedHex = s => (s >>> 0).toString(16).padStart(8, '0');
 const saveRecords = () => {
   // Keep storage bounded, but never evict a best run that another table points to.
   if (REC.challenges.length > 40) REC.challenges.length = 40;
-  [...REC.L.map((T, lv) => [T, lv, CTRL.tap]), ...REC.R.map((T, lv) => [T, lv, CTRL.ride]), ...REC.S.map((T, lv) => [T, lv, CTRL.slalom])].forEach(([T, lv, ctrl]) => {
+  [...REC.L.map((T, lv) => [T, lv, CTRL.tap, 0]), ...REC.R.map((T, lv) => [T, lv, CTRL.ride, 0]), ...REC.S.map((T, lv) => [T, lv, CTRL.slalom, 0]), ...REC.H.map((T, lv) => [T, lv, CTRL.tap, 1]), ...REC.HR.map((T, lv) => [T, lv, CTRL.ride, 1])].forEach(([T, lv, ctrl, vr]) => {
     const keep = new Set([
       ...Object.keys(T.rivers).map(n => seedHex(riverSeed(n))),
       ...Object.keys(T.daily).sort().slice(-14).map(k => seedHex(dailySeed(k))),
-      ...REC.challenges.filter(h => (h.level ?? 1) === lv && (h.ctrl | 0) === ctrl).map(h => h.seed),
+      ...REC.challenges.filter(h => (h.level ?? 1) === lv && (h.ctrl | 0) === ctrl && (h.variant | 0) === vr).map(h => h.seed),
     ]);
     const ev = Object.keys(T.seeds).filter(k => !keep.has(k));
     if (ev.length > 60) ev.sort((a, b) => (T.seeds[a].at || 0) - (T.seeds[b].at || 0)).slice(0, ev.length - 60).forEach(k => delete T.seeds[k]);
@@ -4660,7 +4711,8 @@ function render(now, dt) {
       G.yawV += (-120 * G.yaw - 14 * G.yawV) * ddt; G.yaw = clamp(G.yaw + G.yawV * ddt, -0.06, 0.06);
       if (rideCoastOn()) drawCoastRing(c, bs, sim, course);
     }
-    drawBoat(c, bs.x, bs.y, boatAngle(bs.vx, bs.vy) + (ride ? G.yaw : 0), paddlePose(st, VT), 'player', 1, night);
+    const blink = sim.invul > 0 && G.state === 'play' ? ((sim.invul >> 3) & 1 ? 0.35 : 0.85) : 1;
+    drawBoat(c, bs.x, bs.y, boatAngle(bs.vx, bs.vy) + (ride ? G.yaw : 0), paddlePose(st, VT), 'player', blink, night);
     if (ride) { drawTempoChevrons(c, bs, sim); drawStrengthBar(c, bs, sim); }
   }
 
@@ -5215,6 +5267,25 @@ function handleEvent(ev, sim, quiet) {
         else showBanner(ev.cur < 0 ? 'Protiproud!' : 'Proud se vrací', ev.cur < 0 ? 'Proud teď táhne NAHORU — záběr tě pošle dolů' : 'Proud opět táhne dolů', 1700, 2);
       }
       break;
+    case 'hit': {   // "Tři životy": a crash that does not end the run
+      const [hx, hy] = sim.heading();
+      for (let i = 0; i < 14; i++) { const a = Math.random() * TAU, v = 50 + Math.random() * 150; spawn({ k: 'drop', x: ev.x, y: ev.y, z: 2, vx: Math.cos(a) * v, vy: Math.sin(a) * v, vz: 120 + Math.random() * 160, s: 1 + Math.random() * 2, life: 0.8 }); }
+      for (let i = 0; i < 8; i++) { const a = Math.random() * TAU, v = 40 + Math.random() * 120; spawn({ k: 'splinter', x: ev.x, y: ev.y, vx: Math.cos(a) * v + hx * 40, vy: Math.sin(a) * v + hy * 40, rot: Math.random() * 6, vr: (Math.random() - 0.5) * 14, s: 2 + Math.random() * 3, life: 1.2, col: Math.random() < 0.5 ? '#e4572e' : '#8a5a33' }); }
+      addRipple(ev.x, ev.y, 1.3, 1.4);
+      if (isPlayer) {
+        trauma = Math.min(1, trauma + 0.7); flash = S.shake && !reducedMotion ? 0.4 : 0.14; flashColor = '255,90,70';
+        A.crash(); Native.haptic('crash'); G.hitAt = VT;
+        updateLivesHud(); popLives(true);
+        showBanner(ev.lives === 1 ? 'Poslední život!' : 'Au!', ev.lives === 1 ? 'Další náraz je konec' : 'Zbývají ' + ev.lives + ' ' + pl(ev.lives, 'život', 'životy', 'životů'), 1500, 2);
+      }
+      break;
+    }
+    case 'life': {
+      if (!isPlayer) break;
+      A.star(); updateLivesHud(); popLives(false);
+      showBanner('Život navíc!', ev.lives + ' ' + pl(ev.lives, 'život', 'životy', 'životů'), 1300, 2);
+      break;
+    }
     case 'crash': {
       const [hx, hy] = sim.heading();
       for (let i = 0; i < 26; i++) { const a = Math.random() * TAU, v = 60 + Math.random() * 220; spawn({ k: 'drop', x: ev.x, y: ev.y, z: 2, vx: Math.cos(a) * v, vy: Math.sin(a) * v, vz: 150 + Math.random() * 220, s: 1 + Math.random() * 2, life: 0.9 }); }
@@ -5229,6 +5300,17 @@ function handleEvent(ev, sim, quiet) {
   }
 }
 
+function popLives(bad) {
+  const el = $('hudLives'); el.classList.remove('hit', 'gain'); void el.offsetWidth; el.classList.add(bad ? 'hit' : 'gain');
+}
+function updateLivesHud() {
+  const el = $('hudLives'), on = G.variant === VARIANT.lives && !!G.sim;
+  el.hidden = !on;
+  if (!on) return;
+  const n = G.sim.lives;
+  el.innerHTML = Array.from({ length: LIVES_MAX }, (_, i) => `<i class="${i < n ? 'on' : 'off'}">♥</i>`).join('');
+  el.setAttribute('aria-label', n + ' ' + pl(n, 'život', 'životy', 'životů'));
+}
 function bumpScore() {
   const el = $('hudScore');
   el.textContent = fmtNum(G.sim.score);
@@ -5264,18 +5346,21 @@ function prepareRun(opt) {
   G.level = levelOf(G.challenge ? G.challenge.level : opt.level ?? S.level).id;
   const cc = G.challenge ? G.challenge.ctrl : opt.ctrl;
   G.ctrl = cc === CTRL.slalom ? CTRL.slalom : cc === CTRL.ride ? CTRL.ride : CTRL.tap;
+  G.variant = G.ctrl === CTRL.slalom ? 0 : G.challenge ? G.challenge.variant | 0 : opt.variant | 0;
   G.course = G.ctrl === CTRL.slalom ? new SlalomCourse(G.seed, G.level) : new Course(G.seed, G.level, G.ctrl);
   layout(true);   // free ride shows a longer stretch ahead (speed boost) → other world scale on narrow screens
   G.sim = G.ctrl === CTRL.slalom ? new SlalomSim(G.course) : G.ctrl === CTRL.ride ? new RideSim(G.course) : new Sim(G.course);
+  if (G.variant === VARIANT.lives) G.sim.withLives();
+  updateLivesHud();
   G.slRes = []; G.slHudAt = -1; G.slDeltaUntil = 0; G.mpStart = 0;
   G.taps = []; G.inputQ = []; G.inputs = []; G.rideQ = []; G.rideSt = 0; G.pad = null; G.streak = 0; G.death = null; G.recordFlag = false;
   G.flipWarned = -1; G.pauses = 0; G.resumeAt = 0; G.pauseAlpha = 1;
   G.ghosts = [];
   ghostTrails.clear();
-  const own = G.mp ? null : LR(G.level, G.ctrl).seeds[seedHex(G.seed)];
+  const own = G.mp ? null : LR(G.level, G.ctrl, G.variant).seeds[seedHex(G.seed)];
   if (G.mp) (opt.racers || []).forEach((p, i) => G.ghosts.push(makeLiveGhost(p, i)));
   if (G.challenge) G.ghosts.push(makeGhost(G.challenge.name || 'Soupeř', G.challenge, 'ghost', G.challenge.score));
-  if (own && own.code) { try { const r = Replay.decode(own.code); if (r.seed === G.seed && r.level === G.level && (r.ctrl | 0) === G.ctrl) G.ghosts.push(makeGhost('Tvůj rekord', r, 'pb', r.score)); } catch { /* other rules version */ } }
+  if (own && own.code) { try { const r = Replay.decode(own.code); if (r.seed === G.seed && r.level === G.level && (r.ctrl | 0) === G.ctrl && (r.variant | 0) === G.variant) G.ghosts.push(makeGhost('Tvůj rekord', r, 'pb', r.score)); } catch { /* other rules version */ } }
   G.bestBefore = bestFor(G.mode, G.seed);
   trail.length = 0; parts.length = 0; ripples.length = 0;
   G.curBiome = 0;
@@ -5287,7 +5372,7 @@ function prepareRun(opt) {
   G.yaw = G.yawV = 0; G.barFlash = -9; G.holdFrom = 0; G.hintAt = -9; G.beatAt = 0;
   document.body.classList.toggle('rideReady', G.ctrl === CTRL.ride);
   updateRideHud();
-  $('hudMode').textContent = `${G.label} · ${levelName(G.level)}`;
+  $('hudMode').textContent = `${G.label} · ${levelName(G.level)}${G.variant ? ' · ❤ ' + VARIANT_NAME : ''}`;
   $('hudBest').textContent = G.bestBefore ? 'Rekord ' + (G.ctrl === CTRL.slalom ? slTime(G.bestBefore) : G.bestBefore) : '';
   updateRaceHud();
   showScreen(null);
@@ -5345,13 +5430,14 @@ function advanceLive(gh, tickNow, maxSteps) {
 function makeGhost(name, rec, style, finalScore) {
   const ctrl = rec.ctrl | 0, ride = ctrl >= CTRL.ride;
   const gh = { name, ride, taps: rec.taps || [], inputs: rec.inputs || [], ti: 0, ii: 0, st: 0, sim: ctrl === CTRL.slalom ? new SlalomSim(G.course) : ride ? new RideSim(G.course) : new Sim(G.course), style, pad: null, finalScore };
+  if ((rec.variant | 0) === VARIANT.lives && ctrl !== CTRL.slalom) gh.sim.withLives();
   // slalom: the ghost's gate-by-gate times (clock + penalties) for the live delta, from a headless replay
   if (ctrl === CTRL.slalom) { try { gh.splits = runSlalom(G.seed, gh.inputs, G.level, (rec.endTick || 0) + 5).splits; } catch { gh.splits = []; } }
   return gh;
 }
 
 function bestFor(mode, seed) {
-  const T = LR(G.level, G.ctrl);
+  const T = LR(G.level, G.ctrl, G.variant);
   if (mode === 'free' && !G.challenge) return Math.max(T.free.best || 0, 0);
   const r = T.seeds[seedHex(seed)];
   let best = r ? r.best : 0;
@@ -5550,7 +5636,7 @@ function mpEarlyEnd(m) {
   G.mpWin = !!(me && me.win);
   if (G.mpWin) { A.record(); Native.haptic('record'); showBanner('Vyhrál jsi!', 'Všichni ostatní už jsou venku', 1600, 2); }
   A.setMusicState('over');
-  G.lastRun = { mode: G.mode, level: G.level, ctrl: G.ctrl, seed: G.seed, score: sim.score, endTick: sim.tick, name: playerName(), label: G.label, taps: G.taps.slice(), inputs: G.inputs.filter(i => i[0] < sim.tick), pauses: 0 };
+  G.lastRun = { variant: 0, mode: G.mode, level: G.level, ctrl: G.ctrl, seed: G.seed, score: sim.score, endTick: sim.tick, name: playerName(), label: G.label, taps: G.taps.slice(), inputs: G.inputs.filter(i => i[0] < sim.tick), pauses: 0 };
   setTimeout(() => { if (G.state === 'dead') showOver(); }, 1500);
 }
 function onSlalomFinish(sim) {
@@ -5577,13 +5663,13 @@ function onPlayerCrash(sim, ev) {
 }
 
 function encodeRun(run) {
-  try { return Replay.encode({ mode: typeof run.mode === 'string' ? (MODES[run.mode] || 0) : run.mode, level: run.level, ctrl: run.ctrl | 0, seed: run.seed, score: run.score, endTick: run.endTick, name: run.name, label: run.label, taps: run.taps || [], inputs: run.inputs || [], pauses: run.pauses }); }
+  try { return Replay.encode({ variant: run.variant | 0, mode: typeof run.mode === 'string' ? (MODES[run.mode] || 0) : run.mode, level: run.level, ctrl: run.ctrl | 0, seed: run.seed, score: run.score, endTick: run.endTick, name: run.name, label: run.label, taps: run.taps || [], inputs: run.inputs || [], pauses: run.pauses }); }
   catch (e) { console.warn(e); return ''; }
 }
 
 function finishRun() {
   const sim = G.sim;
-  const run = { mode: G.mode, level: G.level, ctrl: G.ctrl, seed: G.seed, score: sim.score, endTick: sim.deathTick, name: playerName(), label: G.label, taps: G.taps.slice(), inputs: G.inputs.filter(i => i[0] < sim.deathTick), pauses: G.pauses | 0 };
+  const run = { variant: G.variant | 0, mode: G.mode, level: G.level, ctrl: G.ctrl, seed: G.seed, score: sim.score, endTick: sim.deathTick, name: playerName(), label: G.label, taps: G.taps.slice(), inputs: G.inputs.filter(i => i[0] < sim.deathTick), pauses: G.pauses | 0 };
   const code = encodeRun(run);
   run.code = code;
   G.lastRun = run;
@@ -5596,7 +5682,7 @@ function finishRun() {
     else MP.lost = true;
     return;
   }
-  const hex = seedHex(G.seed), T = LR(G.level, G.ctrl);
+  const hex = seedHex(G.seed), T = LR(G.level, G.ctrl, G.variant);
   const prev = T.seeds[hex];
   G.newBest = false;
   // random free rivers are only worth remembering when something was achieved on them
@@ -5614,7 +5700,7 @@ function finishRun() {
     const ch = G.challenge;
     const key = ch.code;
     let h = REC.challenges.find(x => x.code === key);
-    if (!h) { h = { from: ch.name, label: ch.label, level: G.level, ctrl: G.ctrl, their: ch.score, mine: 0, verified: ch.verified, code: key, seed: hex, at: Date.now(), tries: 0 }; REC.challenges.unshift(h); }
+    if (!h) { h = { from: ch.name, label: ch.label, level: G.level, ctrl: G.ctrl, variant: G.variant, their: ch.score, mine: 0, verified: ch.verified, code: key, seed: hex, at: Date.now(), tries: 0 }; REC.challenges.unshift(h); }
     h.tries++; h.mine = Math.max(h.mine, sim.score); h.at = Date.now();
   }
   saveRecords();
@@ -5632,7 +5718,7 @@ function showOver() {
   if (slalom) $('ovScore').textContent = slTime(sim.score) + ' ' + slMedal(G.level, SL_CAP - sim.score);
   else countUp($('ovScore'), sim.score, clamp(250 + sim.score * 10, 300, 900));
   $('ovScore').parentElement.classList.toggle('time', slalom);
-  $('ovLabel').textContent = `${G.label} · ${levelName(G.level)}`;
+  $('ovLabel').textContent = `${G.label} · ${levelName(G.level)}${G.variant ? ' · ❤ ' + VARIANT_NAME : ''}`;
   $('ovL1').textContent = slalom ? 'Čisté branky' : 'Branky'; $('ovL2').innerHTML = slalom ? 'Tresty' : '<i class="star">★</i> Hvězdy';
   $('ovGates').textContent = slalom ? sim.cleanGates + '/' + sim.c.gates.length : sim.gatesPassed;
   $('ovStars').textContent = slalom ? '+' + (sim.pen / TICK_RATE).toFixed(0) + ' s' : sim.starsGot;
@@ -5697,8 +5783,8 @@ function pickCrashTitle(cause) {
 
 function restart(sameSeed) {
   if (G.mp) { mpBackToRoom(); return; }
-  if (G.mode === 'free' && !sameSeed && !G.challenge) prepareRun({ mode: 'free', seed: newRandomSeed(), label: G.label, level: G.level, ctrl: G.ctrl });
-  else prepareRun({ mode: G.mode, seed: G.seed, label: G.label, challenge: G.challenge, level: G.level, ctrl: G.ctrl });
+  if (G.mode === 'free' && !sameSeed && !G.challenge) prepareRun({ mode: 'free', seed: newRandomSeed(), label: G.label, level: G.level, ctrl: G.ctrl, variant: G.variant });
+  else prepareRun({ mode: G.mode, seed: G.seed, label: G.label, challenge: G.challenge, level: G.level, ctrl: G.ctrl, variant: G.variant });
 }
 
 function pause() {
@@ -6223,6 +6309,8 @@ function escapeHtml(s) { return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp
 
 const LEVEL_INFO = ['Klidnější voda, bez protiproudu, větší mezery', 'Peřeje s protiproudem a pohyblivými zátarasy', 'Rychlá a těsná divoká voda, protiproud brzy'];
 function syncCtrlButtons() {
+  document.querySelectorAll('[data-action="set-variant"]').forEach(b => { const on = +b.dataset.variant === S.variant; b.classList.toggle('on', on); b.setAttribute('aria-checked', on ? 'true' : 'false'); });
+  { const vi = $('variantInfo'); if (vi) vi.textContent = S.variant ? 'Náraz tě zpomalí a stojí život. Po 25 brankách se jeden vrátí. Třetí náraz = konec.' : ''; }
   document.querySelectorAll('[data-action="set-ctrl"]').forEach(b => { const on = +b.dataset.ctrl === S.ctrl; b.classList.toggle('on', on); b.setAttribute('aria-checked', on ? 'true' : 'false'); });
 }
 function syncLevelButtons() {
@@ -6251,7 +6339,7 @@ function refreshMenu() {
   { const em = document.querySelector('[data-action="open-mp"] .new'); if (em) em.hidden = REC.stats.mpRaces > 0; }
   { const em = document.querySelector('[data-action="open-slalom"] .new'); if (em) em.hidden = REC.stats.slalomRuns > 0; }
   { const T = LR(S.level, CTRL.slalom), best = T.free.best || Math.max(0, ...Object.values(T.seeds).map(r => r.best || 0)); $('menuBestSlalom').textContent = best ? 'nejlepší ' + slTime(best) : 'branky na čas'; }
-  const T = LR(S.level, S.ctrl);
+  const T = LR(S.level, S.ctrl, S.variant);
   $('menuBestFree').textContent = T.free.best ? 'rekord ' + T.free.best : S.ctrl === CTRL.ride ? 'drž nahoru / dolů' : 'ťukej a uhýbej';
   const dk = utcDayKey();
   $('menuBestDaily').textContent = T.daily[dk] ? 'dnes ' + T.daily[dk] : 'stejná řeka pro všechny';
@@ -6264,21 +6352,21 @@ const ctrlName = c => c === CTRL.ride ? 'Volná jízda' : 'Volná plavba';
 function firstRideLevel() { return S.ctrl === CTRL.ride && !(REC.stats.rideRuns > 0) && S.level > 0 ? 0 : undefined; }
 function startFree() {
   const lv = firstRideLevel();
-  prepareRun({ mode: 'free', seed: newRandomSeed(), label: ctrlName(S.ctrl), ctrl: S.ctrl, level: lv });
+  prepareRun({ mode: 'free', seed: newRandomSeed(), label: ctrlName(S.ctrl), ctrl: S.ctrl, level: lv, variant: S.variant });
   if (lv === 0) toast('První jízda poběží na úrovni Děti — Normální si zkusíš po ní', 4500);
 }
 function startDaily() {
   const dk = utcDayKey();
   G.dayKey = dk;
   const lv = firstRideLevel();
-  prepareRun({ mode: 'daily', seed: dailySeed(dk), label: modeLabel('daily', dk), ctrl: S.ctrl, level: lv });
+  prepareRun({ mode: 'daily', seed: dailySeed(dk), label: modeLabel('daily', dk), ctrl: S.ctrl, level: lv, variant: S.variant });
   if (lv === 0) toast('První jízda poběží na úrovni Děti', 4000);
 }
 function startRiver(name) {
   name = riverName(name);
   if (!name) { toast('Zadej název řeky'); return; }
   G.riverName = name;
-  prepareRun({ mode: 'river', seed: riverSeed(name), label: modeLabel('river', name), ctrl: S.ctrl, level: firstRideLevel() });
+  prepareRun({ mode: 'river', seed: riverSeed(name), label: modeLabel('river', name), ctrl: S.ctrl, level: firstRideLevel(), variant: S.variant });
 }
 
 // What a code claims about its river is only shown when the seed proves it.
@@ -6313,11 +6401,11 @@ function loadChallenge(text) {
     const info = describeSeed(r);
     r.info = info;
     pendingChallenge = r;
-    const mine = LR(r.level, r.ctrl | 0).seeds[seedHex(r.seed)];
+    const mine = LR(r.level, r.ctrl | 0, r.variant | 0).seeds[seedHex(r.seed)];
     const pz = r.pauses > 0 ? ` · pauzy: ${r.pauses}` : r.pauses === 0 ? ' · bez pauzy' : '';
     box.innerHTML = `
       <div class="ch-head"><span class="avatar">${escapeHtml((r.name || '?').slice(0, 1).toUpperCase())}</span>
-      <div><b>${escapeHtml(r.name || 'Anonym')}</b><small>${escapeHtml(info.label)} · ${levelName(r.level)}${r.ctrl === CTRL.slalom ? ' · slalom' : r.ctrl === CTRL.ride ? ' · volná jízda' : ''}</small></div>
+      <div><b>${escapeHtml(r.name || 'Anonym')}</b><small>${escapeHtml(info.label)} · ${levelName(r.level)}${r.ctrl === CTRL.slalom ? ' · slalom' : r.ctrl === CTRL.ride ? ' · volná jízda' : ''}${r.variant ? ' · ❤ ' + VARIANT_NAME : ''}</small></div>
       <div class="ch-score">${r.ctrl === CTRL.slalom ? slTime(r.score) : r.score}<small>${r.ctrl === CTRL.slalom ? 'čas s tresty' : pl(r.score, 'bod', 'body', 'bodů')}</small></div></div>
       <div class="ch-meta">${v.ok ? '<span class="ok">✓ Skóre ověřeno přehráním záznamu</span>' : `<span class="bad">⚠ Záznam dává ${scoreText(v.score, r.ctrl)}, ne ${scoreText(r.claimed, r.ctrl)}. Hraje se proti skutečnému výsledku.</span>`}
       ${info.tag ? `<span class="${info.tag[0] === '✓' ? 'ok' : 'bad'}">${escapeHtml(info.tag)}</span>` : ''}
@@ -6342,7 +6430,7 @@ function acceptChallenge() {
   G.riverName = info.riverName || '';
   challengeReturn = null;
   clearHash();
-  prepareRun({ mode: info.mode, seed: r.seed, label: info.label, challenge: r, level: r.level, ctrl: r.ctrl });
+  prepareRun({ mode: info.mode, seed: r.seed, label: info.label, challenge: r, level: r.level, ctrl: r.ctrl, variant: r.variant | 0 });
 }
 function openChallengeScreen(code, from) {
   challengeReturn = from || null;
@@ -6363,7 +6451,7 @@ function openShare(run) {
   // The link opens the challenge right in the browser; the app reads the code out of the pasted message.
   const hosted = !isNative && /^https?:/.test(location.protocol) && !/^(localhost|127\.0\.0\.1)$/.test(location.hostname);
   const link = `${hosted ? location.origin + location.pathname : WEB_URL}#${run.code}`;
-  const msg = `🛶 PEŘEJE — ${run.label} (${levelName(run.level)}): ${scoreText(run.score, run.ctrl)}${run.ctrl === CTRL.slalom ? ' (s tresty)' : ''}. Překonáš mě?\nHraj tady: ${link}\n(V aplikaci PEŘEJE stačí celou zprávu vložit do Výzev.)`;
+  const msg = `🛶 PEŘEJE — ${run.label} (${levelName(run.level)}${run.variant ? ', ❤ ' + VARIANT_NAME : ''}): ${scoreText(run.score, run.ctrl)}${run.ctrl === CTRL.slalom ? ' (s tresty)' : ''}. Překonáš mě?\nHraj tady: ${link}\n(V aplikaci PEŘEJE stačí celou zprávu vložit do Výzev.)`;
   $('shareText').value = msg;
   $('shareCode').textContent = run.code;
   $('shareSummary').textContent = `${run.name} · ${run.label} · ${levelName(run.level)} · ${scoreText(run.score, run.ctrl)}`;
@@ -6388,14 +6476,17 @@ async function copyText(text) {
   toast('Schránka není dostupná — text je označený, zkopíruj ho ručně');
 }
 
+let recVar = 0;   // "Tři životy" table on the records screen
 let recCtrl = CTRL.tap;   // which control scheme the records screen shows
 function renderRecords() {
   const dk = utcDayKey();
-  const st = REC.stats, T = LR(S.level, recCtrl);
+  if (recCtrl === CTRL.slalom) recVar = 0;
+  const st = REC.stats, T = LR(S.level, recCtrl, recVar);
   const fv = v => recCtrl === CTRL.slalom ? (v ? slTime(v) + ' ' + slMedal(S.level, SL_CAP - v) : '–') : (v || 0);
   const rows = [];
   const dailyHex = seedHex(dailySeed(dk));
   rows.push(`<div class="levels ctrls" role="radiogroup" aria-label="Režim">${[[CTRL.tap, 'Plavba'], [CTRL.ride, 'Volná jízda'], [CTRL.slalom, 'Slalom']].map(([v, n]) => `<button class="lvl${v === recCtrl ? ' on' : ''}" role="radio" aria-checked="${v === recCtrl}" data-action="rec-ctrl" data-ctrl="${v}">${n}</button>`).join('')}</div>`);
+  if (recCtrl !== CTRL.slalom) rows.push(`<div class="levels two" role="radiogroup" aria-label="Varianta">${[[0, 'Klasika'], [1, '❤ ' + VARIANT_NAME]].map(([v, n]) => `<button class="lvl${v === recVar ? ' on' : ''}" role="radio" aria-checked="${v === recVar}" data-action="rec-var" data-variant="${v}">${n}</button>`).join('')}</div>`);
   rows.push(`<div class="levels" role="radiogroup" aria-label="Obtížnost">${[0, 1, 2].map(i => `<button class="lvl${i === S.level ? ' on' : ''}" role="radio" aria-checked="${i === S.level}" data-action="set-level" data-level="${i}">${levelName(i)}</button>`).join('')}</div>`);
   rows.push(`<div class="rec-grid">
     <div><small>${recCtrl === CTRL.slalom ? 'Nová trať' : recCtrl === CTRL.ride ? 'Volná jízda' : 'Volná plavba'}</small><b>${fv(T.free.best)}</b>${T.free.code ? `<button class="mini" data-action="share-code" data-code="${T.free.code}">Vyzvat</button>` : ''}</div>
@@ -6434,6 +6525,7 @@ document.addEventListener('click', e => {
   if (act !== 'back') A.ui('click');
   switch (act) {
     case 'play-free': startFree(); break;
+    case 'set-variant': S.variant = +btn.dataset.variant === VARIANT.lives ? VARIANT.lives : 0; saveSettings(); refreshMenu(); break;
     case 'set-ctrl': S.ctrl = +btn.dataset.ctrl === CTRL.ride ? CTRL.ride : CTRL.tap; saveSettings(); refreshMenu(); break;
     case 'open-mp': openMp(); break;
     case 'mp-register': mpRegister(); break;
@@ -6454,11 +6546,12 @@ document.addEventListener('click', e => {
       else prepareRun({ mode: 'track', seed: trackSeed(t), label: 'Trať ' + t, ctrl: CTRL.slalom });
       break;
     }
+    case 'rec-var': recVar = +btn.dataset.variant === VARIANT.lives ? VARIANT.lives : 0; renderRecords(); break;
     case 'rec-ctrl': recCtrl = +btn.dataset.ctrl === CTRL.slalom ? CTRL.slalom : +btn.dataset.ctrl === CTRL.ride ? CTRL.ride : CTRL.tap; renderRecords(); break;
     case 'set-level': S.level = levelOf(+btn.dataset.level).id; saveSettings(); refreshMenu(); if (currentScreen === 'scrRecords') renderRecords(); if (currentScreen === 'scrSlalom') refreshSlalom(); break;
     case 'play-daily': startDaily(); break;
     case 'open-challenge': openChallengeScreen('', currentScreen === 'scrMenu' ? null : currentScreen); break;
-    case 'open-records': recCtrl = S.ctrl; renderRecords(); showScreen('scrRecords'); break;
+    case 'open-records': recCtrl = S.ctrl; recVar = S.ctrl === CTRL.slalom ? 0 : S.variant; renderRecords(); showScreen('scrRecords'); break;
     case 'open-settings': syncSettingsUI(); showScreen('scrSettings'); break;
     case 'open-help': showScreen('scrHelp'); break;
     case 'back': backFrom(currentScreen); break;
@@ -6481,10 +6574,10 @@ document.addEventListener('click', e => {
     case 'copy-code': copyText($('shareCode').textContent); break;
     case 'native-share': Native.share($('shareText').value); break;
     case 'share-code': { try { const r = Replay.decode(btn.dataset.code); openShare(Object.assign(r, { code: btn.dataset.code })); } catch (err) { toast(err.message || 'Záznam je poškozený'); } break; }
-    case 'share-seed': { const rec = LR(S.level, recCtrl).seeds[btn.dataset.seed]; if (rec && rec.code) { try { const r = Replay.decode(rec.code); openShare(Object.assign(r, { code: rec.code })); } catch (err) { toast(err.message || 'Záznam je poškozený'); } } else toast('Na této řece zatím nemáš jízdu'); break; }
+    case 'share-seed': { const rec = LR(S.level, recCtrl, recVar).seeds[btn.dataset.seed]; if (rec && rec.code) { try { const r = Replay.decode(rec.code); openShare(Object.assign(r, { code: rec.code })); } catch (err) { toast(err.message || 'Záznam je poškozený'); } } else toast('Na této řece zatím nemáš jízdu'); break; }
     case 'replay-challenge': openChallengeScreen(btn.dataset.code, 'scrRecords'); break;
     case 'reset-records':
-      if (confirm('Opravdu smazat všechny rekordy a historii výzev?')) { for (const k of Object.keys(REC)) delete REC[k]; Object.assign(REC, { L: [blankLevelRec(), blankLevelRec(), blankLevelRec()], R: [blankLevelRec(), blankLevelRec(), blankLevelRec()], S: [blankLevelRec(), blankLevelRec(), blankLevelRec()], slalomKey: RIDE_RULES + ':' + SLALOM_RULES, rideRules: RIDE_RULES, challenges: [], stats: { runs: 0, gates: 0, stars: 0, strokes: 0, dist: 0, time: 0 } }); saveRecords(); renderRecords(); toast('Rekordy smazány'); }
+      if (confirm('Opravdu smazat všechny rekordy a historii výzev?')) { for (const k of Object.keys(REC)) delete REC[k]; Object.assign(REC, { H: [blankLevelRec(), blankLevelRec(), blankLevelRec()], HR: [blankLevelRec(), blankLevelRec(), blankLevelRec()], livesKey: LIVES_RULES + ':' + RIDE_RULES, L: [blankLevelRec(), blankLevelRec(), blankLevelRec()], R: [blankLevelRec(), blankLevelRec(), blankLevelRec()], S: [blankLevelRec(), blankLevelRec(), blankLevelRec()], slalomKey: RIDE_RULES + ':' + SLALOM_RULES, rideRules: RIDE_RULES, challenges: [], stats: { runs: 0, gates: 0, stars: 0, strokes: 0, dist: 0, time: 0 } }); saveRecords(); renderRecords(); toast('Rekordy smazány'); }
       break;
   }
 });
