@@ -2,13 +2,13 @@
 <html lang="cs">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
 <meta name="theme-color" content="#0b2530">
 <meta name="color-scheme" content="dark">
 <meta name="description" content="PEŘEJE — říční výzva. Pádluj loďkou mezi skalami, kládami a pilíři mostů, sbírej hvězdy a vyzvi přátele na stejnou řeku.">
 <title>PEŘEJE — říční výzva</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230d3a4a'/%3E%3Cpath d='M6 40c8-6 16 6 26 0s18 6 26 0' stroke='%235fd4ff' stroke-width='5' fill='none' stroke-linecap='round'/%3E%3Cpath d='M14 30c6-6 30-6 36 0c-6 5-30 5-36 0z' fill='%23ff6a3d'/%3E%3Ccircle cx='31' cy='29' r='4' fill='%232f7fd6'/%3E%3C/svg%3E">
-<link rel="stylesheet" href="pereje.f0a310176a.css">
+<link rel="stylesheet" href="pereje.75edf32c7d.css">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="icon-180.png">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -19,6 +19,8 @@
 <body>
 <svg class="sprite" width="0" height="0" aria-hidden="true">
   <symbol id="i-group" viewBox="0 0 24 24"><circle cx="8" cy="8" r="3.2" fill="currentColor"/><circle cx="16.5" cy="9" r="2.6" fill="currentColor" opacity=".75"/><path d="M2.5 19c.6-3.4 3-5.3 5.5-5.3s4.9 1.9 5.5 5.3zM13.6 14.4c.9-.7 1.9-1 2.9-1 2.2 0 4.2 1.6 4.8 4.6h-6" fill="currentColor"/></symbol>
+  <symbol id="i-sound" viewBox="0 0 24 24"><path d="M4 9.5v5h3.6L12 18.5v-13L7.6 9.5z" fill="currentColor"/><path d="M15.2 8.8a4.6 4.6 0 0 1 0 6.4M17.8 6.2a8.3 8.3 0 0 1 0 11.6" stroke="currentColor" stroke-width="1.9" fill="none" stroke-linecap="round"/></symbol>
+  <symbol id="i-mute" viewBox="0 0 24 24"><path d="M4 9.5v5h3.6L12 18.5v-13L7.6 9.5z" fill="currentColor"/><path d="M16 9.5l5 5m0-5l-5 5" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/></symbol>
   <symbol id="i-ride" viewBox="0 0 24 24"><path d="M12 3v18M12 3l-4 4M12 3l4 4M12 21l-4-4M12 21l4-4" stroke="currentColor" stroke-width="2.2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></symbol>
   <symbol id="i-play" viewBox="0 0 24 24"><path d="M8 5.5v13a1 1 0 0 0 1.5.86l10.5-6.5a1 1 0 0 0 0-1.72L9.5 4.64A1 1 0 0 0 8 5.5z" fill="currentColor"/></symbol>
   <symbol id="i-cal" viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="15.5" rx="3" fill="none" stroke="currentColor" stroke-width="2"/><path d="M3.5 10h17M8 3v4M16 3v4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="12" cy="15" r="2" fill="currentColor"/></symbol>
@@ -47,10 +49,12 @@
     <div id="hudMode" class="chip"></div>
     <div id="hudBest" class="sub"></div>
   </div>
-  <div id="hudScore">0</div>
-  <div id="hudRide"><div id="hudMult" class="dim">×1</div><div id="hudMeter"><i></i></div></div>
+  <div id="hudCenter"><div id="hudScore">0</div>
+  <div id="hudRide"><div id="hudMult" class="dim">×1</div><div id="hudMeter"><i></i></div></div></div>
+  <div id="hudSl"><span id="hudSlGate"></span><span id="hudSlPen"></span><span id="hudSlDelta"></span></div>
   <div class="hud-right">
     <button id="btnPause" class="iconbtn" data-action="pause" aria-label="Pauza (Esc)"><svg><use href="#i-pause"/></svg></button>
+    <button class="iconbtn mutebtn" data-action="mute" aria-label="Ztlumit (M)"><svg class="snd"><use href="#i-sound"/></svg><svg class="mut"><use href="#i-mute"/></svg></button>
     <div id="hudRace"></div>
   </div>
 </div>
@@ -59,9 +63,9 @@
 
 <div id="tapHint" class="hidden">
   <div class="hand"><span class="ring"></span><span class="ring r2"></span><svg viewBox="0 0 24 24"><path d="M9 11V5.5a1.5 1.5 0 0 1 3 0V10m0-.5V8a1.5 1.5 0 0 1 3 0v2m0-.5a1.5 1.5 0 0 1 3 0V14a6 6 0 0 1-6 6h-1.2a5 5 0 0 1-4.1-2.2L4.2 14a1.5 1.5 0 0 1 2.3-1.9L9 14.5" fill="#fff" stroke="#0b2530" stroke-width="1.3" stroke-linejoin="round"/></svg></div>
-  <b class="tap-only">Ťukni, klikni nebo stiskni mezerník</b>
+  <b class="tap-only fine-only">Ťukni, klikni nebo stiskni mezerník</b><b class="tap-only coarse-only">Ťukni kamkoli na obrazovku</b>
   <span class="t1 tap-only">Každý záběr pádlem tě odtlačí <em>proti proudu</em>.</span>
-  <span class="t2 tap-only">Proud tě táhne ke břehu — šipky u loďky ukazují kam. Proplouvej mezerami, sbírej <i class="star">★</i>.</span>
+  <span class="t2 tap-only">Proud tě táhne ke břehu — šipky u loďky ukazují kam. Proplouvej mezerami, sbírej <i class="star">★</i>. Břeh i překážky = konec.</span>
   <b class="ride-only fine-only">Drž levé tlačítko = nahoru, pravé = dolů</b>
   <b class="ride-only coarse-only">Drž horní půlku = nahoru, dolní = dolů</b>
   <span class="t1 ride-only"><span class="fine-only">Klávesy <kbd>↑</kbd>/<kbd>W</kbd> a <kbd>↓</kbd>/<kbd>S</kbd> · </span>Krátké ťuknutí = jemný záběr. Držením se rozjedeš.</span>
@@ -70,6 +74,7 @@
 
 <!-- ═════ MENU ═════ -->
 <section id="scrMenu" class="screen menu show" role="dialog" aria-modal="true" aria-label="Hlavní menu">
+  <button class="iconbtn mutebtn menu-mute" data-action="mute" aria-label="Ztlumit (M)"><svg class="snd"><use href="#i-sound"/></svg><svg class="mut"><use href="#i-mute"/></svg></button>
   <div class="menu-wrap">
     <header class="logo">
       <h1>PEŘEJE</h1>
@@ -81,10 +86,14 @@
         <button class="lvl" role="radio" data-action="set-level" data-level="1">🛶 Normální</button>
         <button class="lvl" role="radio" data-action="set-level" data-level="2">🔥 Profi vodák</button>
       </div>
+      <div class="levels two" role="radiogroup" aria-label="Ovládání">
+        <button class="lvl" role="radio" data-action="set-ctrl" data-ctrl="0">👆 Ťukání</button>
+        <button class="lvl" role="radio" data-action="set-ctrl" data-ctrl="1">✋ Držení</button>
+      </div>
       <p class="level-info"></p>
       <button class="btn primary" data-action="play-free" data-autofocus><svg><use href="#i-play"/></svg><span>Plout</span><small id="menuBestFree"></small></button>
-      <button class="btn ride" data-action="play-ride"><svg><use href="#i-ride"/></svg><span>Volná jízda <em class="new">NOVÉ</em></span><small id="menuBestRide"></small></button>
-      <button class="btn mp" data-action="open-mp"><svg><use href="#i-group"/></svg><span>Závod s přáteli <em class="new">NOVÉ</em></span><small>naživo, až 8 hráčů</small></button>
+      <button class="btn mp" data-action="open-mp"><svg><use href="#i-group"/></svg><span>Závod s přáteli <em class="new">NOVÉ</em></span><small>živě · až 8</small></button>
+      <button class="btn slalom" data-action="open-slalom"><svg><use href="#i-ride"/></svg><span>Slalom na čas <em class="new">NOVÉ</em></span><small id="menuBestSlalom">branky na čas</small></button>
       <button class="btn" data-action="play-daily"><svg><use href="#i-cal"/></svg><span>Denní výzva</span><small id="menuBestDaily"></small></button>
       <button class="btn" data-action="open-challenge"><svg><use href="#i-duel"/></svg><span>Výzva od kamaráda / vlastní řeka</span></button>
       <div class="row3">
@@ -104,8 +113,8 @@
     <h2 id="ovTitle" aria-live="polite">Ztroskotání!</h2>
     <div class="bigscore"><span id="ovScore">0</span><small id="ovLabel"></small></div>
     <div class="stats">
-      <div><small>Branky</small><b id="ovGates">0</b></div>
-      <div><small><i class="star">★</i> Hvězdy</small><b id="ovStars">0</b></div>
+      <div><small id="ovL1">Branky</small><b id="ovGates">0</b></div>
+      <div><small id="ovL2"><i class="star">★</i> Hvězdy</small><b id="ovStars">0</b></div>
       <div><small id="ovL3">Vzdálenost</small><b id="ovDist">0 m</b></div>
       <div><small id="ovL4">Čas</small><b id="ovTime">0 s</b></div>
     </div>
@@ -153,6 +162,31 @@
       <input id="riverInput" maxlength="24" placeholder="Název řeky" spellcheck="false" autocomplete="off">
       <button class="btn primary fit" data-action="play-river"><svg><use href="#i-play"/></svg><span>Plout</span></button>
     </div>
+  </div>
+</section>
+
+<!-- ═════ SLALOM NA ČAS ═════ -->
+<section id="scrSlalom" class="screen" role="dialog" aria-modal="true" aria-labelledby="tSlalom">
+  <div class="card wide">
+    <div class="titlebar"><button class="iconbtn" data-action="back" aria-label="Zpět"><svg><use href="#i-back"/></svg></button><h2 id="tSlalom">Slalom na čas</h2></div>
+    <p class="muted">Projeď všechny branky mezi tyčemi a doraž do cíle nejrychleji. Každý záběr tě i posune dopředu — jen ať neutíká síla. Držíš levé / pravé tlačítko (↑ / ↓, na telefonu horní / dolní polovinu).</p>
+    <div class="levels" role="radiogroup" aria-label="Obtížnost">
+      <button class="lvl" role="radio" data-action="set-level" data-level="0">Děti</button>
+      <button class="lvl" role="radio" data-action="set-level" data-level="1">Normální</button>
+      <button class="lvl" role="radio" data-action="set-level" data-level="2">Profi vodák</button>
+    </div>
+    <div class="sl-tracks">
+      <button class="btn primary" data-action="play-slalom" data-track="1" data-autofocus><span>Trať 1</span><small id="slBest1"></small></button>
+      <button class="btn" data-action="play-slalom" data-track="2"><span>Trať 2</span><small id="slBest2"></small></button>
+      <button class="btn" data-action="play-slalom" data-track="3"><span>Trať 3</span><small id="slBest3"></small></button>
+      <button class="btn" data-action="play-slalom" data-track="daily"><svg><use href="#i-cal"/></svg><span>Denní slalom</span><small id="slBestDaily"></small></button>
+      <button class="btn" data-action="play-slalom" data-track="free"><span>Nová trať</span><small id="slBestFree"></small></button>
+    </div>
+    <ul class="sl-rules">
+      <li><b>Zelená branka:</b> projeď mezi tyčemi. <b>Červená:</b> těsná šikana, rychlý obrat.</li>
+      <li id="slRules"></li>
+      <li id="slMedals"></li>
+    </ul>
   </div>
 </section>
 
@@ -234,7 +268,8 @@
     <label class="set web-only"><span>Velikost hry</span>
       <select id="setFrame"><option value="960">Malé okno (960×540)</option><option value="1280">Okno (1280×720)</option><option value="1600">Velké okno (1600×900)</option><option value="full">Celá obrazovka</option></select></label>
     <label class="set toggle"><span>Duchové soupeřů a rekordu</span><input id="setGhosts" type="checkbox"><i></i></label>
-    <label class="set toggle"><span>Otřesy obrazovky</span><input id="setShake" type="checkbox"><i></i></label>
+    <label class="set toggle"><span>Otřesy a záblesky obrazovky</span><input id="setShake" type="checkbox"><i></i></label>
+    <div class="set"><span>Nápovědy</span><button class="btn small slim" data-action="reset-tips">Znovu zobrazit tipy</button></div>
     <label class="set toggle"><span>Vibrace</span><input id="setHaptics" type="checkbox"><i></i></label>
     <label class="set toggle"><span>Zobrazit hitboxy <small>(Shift+H)</small></span><input id="setHitbox" type="checkbox"><i></i></label>
     <label class="set toggle"><span>Ukazatel FPS <small>(Shift+F)</small></span><input id="setFps" type="checkbox"><i></i></label>
@@ -249,6 +284,7 @@
       <li><b>Záběr pádlem</b> — ťuknutí, klik, mezerník (nebo ↑ / W) či tlačítko A na gamepadu. Záběr míří <b>vždy proti proudu</b> — v protiproudu tedy loďku pošle dolů.</li>
       <li><b>Proud</b> tě neustále táhne k jednomu břehu. Šipky u loďky ukazují směr. Dotek břehu nebo překážky = ztroskotání.</li>
       <li><b>Protiproud</b> — později se proud obrací. Před zlomem přijde varování a pás <em>klidné vody</em>: proud v něm slábne, loďka se sama srovná a záběry jsou jemnější. Za ním už táhne na druhou stranu.</li>
+      <li><b>Slalom na čas</b> — pevná trať s brankami mezi tyčemi a cílem. Měří se čas s tresty (dotek tyče, vynechaná branka, kámen, břeh); rekordy jsou zvlášť pro každou trať a obtížnost a výzvu pošleš kamarádům i s duchem.</li>
       <li><b>Obtížnost</b> — <b>Děti</b>: pomalejší řeka, široké mezery, bez protiproudu. <b>Normální</b>: klasické peřeje. <b>Profi vodák</b>: rychlá a těsná voda. Rekordy i výzvy se počítají zvlášť pro každou obtížnost; výzva od kamaráda se vždy jede na jeho obtížnost.</li>
       <li><b>Volná jízda</b> — drž levé tlačítko (<kbd>↑</kbd>/<kbd>W</kbd>) a pádluješ nahoru, pravé (<kbd>↓</kbd>/<kbd>S</kbd>) dolů; na telefonu drž horní nebo dolní půlku. Čím déle držíš, tím rychlejší tempo a silnější záběry — ale ubývá síla (proužek pod loďkou). Když pustíš, loď ještě klouže a síla se vrací (v klidné vodě rychleji, hvězdy a těsné průjezdy ji doplní). Opačným záběrem zabrzdíš. Branky bez vyčerpání budují sérii: ×2 po 5, FLOW ×3 po 15 — ve FLOW tě pádlování stojí jen polovinu síly. Když ti síla dojde, série spadne na ×1 a chvíli pádluješ slabě.</li>
       <li><b>Body</b> — každá proplutá branka +1, každá <i class="star">★</i> hvězda +1. Hvězdy bývají na odvážných místech.</li>
@@ -272,6 +308,6 @@
 </div>
 <noscript><p class="noscript">Hra potřebuje JavaScript.</p></noscript>
 
-<script src="pereje.f6b90c6cee.js"></script>
+<script src="pereje.62185158c1.js"></script>
 </body>
 </html>

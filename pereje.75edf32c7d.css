@@ -391,3 +391,62 @@ i.ok { color: #7fe3a0; font-style: normal; } i.bad { color: #ff8f7a; font-style:
 .result.mp { display: block; text-align: left; }
 .mp-standings li.fake span, .mp-standings li.fake b, .mp-last li.fake span, .mp-last li.fake b { text-decoration: line-through; opacity: .6; }
 .mp-players .kick { min-height: 28px; padding: 2px 9px; margin-left: 4px; }
+
+/* slalom na čas */
+.btn.slalom { border-color: rgba(120, 255, 180, .35); }
+.btn.slalom svg { color: #8dffbd; }
+#hudSl { display: none; position: absolute; left: 50%; top: calc(10px + var(--safe-t) + clamp(34px, calc(8.6 * var(--vw, 1vw)), 82px)); transform: translateX(-50%);
+  align-items: center; gap: 10px; pointer-events: none; font: 700 clamp(12px, calc(1.9 * var(--vw, 1vw)), 15px) var(--font); color: #e6f8ff; text-shadow: 0 2px 4px rgba(0, 20, 30, .7); white-space: nowrap; }
+body.slalom.playing #hudSl { display: flex; }
+#hudSl span { padding: 3px 9px; border-radius: 99px; background: rgba(5, 25, 34, .6); }
+#hudSl span:empty { display: none; }
+#hudSlPen { color: #ff9f8a; }
+#hudSlPen.pop { animation: pop .3s cubic-bezier(.2, .9, .3, 1.5); }
+#hudSlDelta.good { color: #8dffbd; } #hudSlDelta.bad { color: #ff9f8a; }
+.sl-tracks { display: grid; gap: 8px; }
+.sl-rules { margin: 4px 0 0; padding-left: 18px; font: 500 13px var(--font); color: var(--ink2); display: grid; gap: 4px; }
+.bigscore.time span { font-size: clamp(38px, 11vw, 64px); }
+
+/* ── polish ── */
+.btn.slim { min-height: 36px; padding: 6px 12px; }
+.mutebtn .mut, .mutebtn.muted .snd { display: none; } .mutebtn.muted .mut { display: block; }
+.menu-mute { position: absolute; top: calc(12px + var(--safe-t)); right: calc(12px + var(--safe-r)); z-index: 2; }
+body.lowfx .card, body.lowfx .iconbtn, body.lowfx .chip, body.lowfx #toast, body.lowfx .race { backdrop-filter: none; -webkit-backdrop-filter: none; background: rgba(8, 30, 40, .88); }
+html, body { touch-action: manipulation; }
+.hint { opacity: .78; }
+@media (pointer: coarse) { .mini, .btn.small { min-height: 44px; } .mp-players .kick { min-height: 40px; min-width: 40px; } }
+/* score + multiplier chip side by side, digits scale with the screen height so they never hide the gates */
+#hudCenter { position: absolute; top: calc(10px + var(--safe-t)); left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 10px; pointer-events: none; }
+#hudScore { position: static; transform: none; font-size: clamp(34px, min(calc(8 * var(--vw, 1vw)), calc(11.5 * var(--vh, 1vh))), 76px); }
+#hudRide { position: static; transform: none; flex-direction: row; align-items: center; gap: 8px; }
+#hudMeter { width: 56px; }
+#hudSl { top: calc(10px + var(--safe-t) + clamp(34px, min(calc(8 * var(--vw, 1vw)), calc(11.5 * var(--vh, 1vh))), 76px) + 6px); }
+@keyframes pop { 0% { transform: scale(1.32); } 100% { transform: scale(1); } }
+/* landscape phones: menu and lobby in two columns so nothing needs scrolling */
+@media (max-height: 520px) and (orientation: landscape) and (min-width: 600px) {
+  .screen.menu { justify-content: center; }
+  .menu-wrap { flex-direction: row; align-items: center; width: min(860px, 100%); margin: auto; gap: 18px; }
+  .menu-wrap .logo { flex: 0 0 34%; }
+  .menu-wrap .card { flex: 1; display: grid; grid-template-columns: 1fr 1fr; gap: 6px; padding: 12px; }
+  .menu-wrap .card > .levels, .menu-wrap .card > .level-info, .menu-wrap .card > .btn.primary, .menu-wrap .card > .row3, .menu-wrap .card > .name { grid-column: 1 / -1; }
+  .menu-wrap .keys { display: none; }
+  .menu-wrap .btn { min-height: 38px; padding: 6px 12px; }
+  .menu-wrap .btn small { display: none; }
+  #scrMp .card.wide { width: min(760px, 100%); }
+  #scrMp .mp-view[data-view="lobby"].on { display: grid; grid-template-columns: 1fr 1fr; grid-auto-rows: min-content; gap: 8px 14px; align-items: start; }
+  #scrMp .mp-players { grid-row: 2 / span 6; max-height: 170px; overflow: auto; }
+}
+.levels.two { grid-template-columns: 1fr 1fr; }
+.btn span em.new { white-space: nowrap; }
+.btn em.new[hidden] { display: none; }
+@media (max-height: 520px) and (orientation: landscape) and (min-width: 600px) {
+  .menu-mute { right: auto; left: calc(12px + var(--safe-l)); }
+  .menu-wrap .card { gap: 5px; padding: 10px; }
+  .menu-wrap .card .lvl { min-height: 32px; }
+  .menu-wrap .card .levels { padding: 3px; }
+  .menu-wrap .card .level-info { display: none; }
+  .menu-wrap .btn { min-height: 34px; padding: 4px 10px; font-size: 14.5px; }
+  .menu-wrap .btn.primary { min-height: 40px; }
+  .menu-wrap .card .name { margin-top: 0; }
+  .menu-wrap .card .name input { padding: 6px 10px; }
+}

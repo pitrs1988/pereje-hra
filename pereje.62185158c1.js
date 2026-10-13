@@ -81,10 +81,48 @@ function segDist2(px, py, x1, y1, x2, y2) {
   return ex * ex + ey * ey;
 }
 
+// ─── Ride-only course features (průplavy, zahrady, slalomy) ───────────────
+//  from  first gate index that may host a feature     gapN  min gates between two features
+//  p     chance per eligible gate [start,end]          mix   cumulative weights channel / garden / slalom
+//  ch*   channel: L length, H half-width of open water, D max centre shift per bend, Bend2 = chance of 2 bends
+//  ga*   rock garden: L length, H guaranteed tube half-width, Cell grid cell (density), Fill rock chance per cell
+//  sl*   slalom: K gates, T seconds between gates, Gap opening, A alternating offset from the centre line
+const WALL_R = 13, LANE_STEP = 70;
+const RIDE_BOOM_SLOW = 1.2;      // ride booms swing 20 % slower: the boat arrives earlier, the time to line up stays the same
+const RIDE_FEAT = [
+  { from: 10, gapN: 5, p: [0.16, 0.26], mix: [0.5, 0.8, 1],   // Děti
+    chL: [380, 520], chH: [92, 80], chD: [40, 70], chBend2: 0,
+    gaL: [420, 540], gaH: [84, 74], gaCell: 96, gaFill: [0.4, 0.48],
+    slK: [3, 3], slT: [1.05, 0.95], slGap: [225, 205], slA: [30, 40] },
+  { from: 6, gapN: 4, p: [0.18, 0.3], mix: [0.45, 0.65, 1],   // Normální
+    chL: [480, 820], chH: [74, 62], chD: [70, 130], chBend2: 0.4,
+    gaL: [520, 760], gaH: [64, 54], gaCell: 78, gaFill: [0.5, 0.62],
+    slK: [3, 5], slT: [0.9, 0.78], slGap: [200, 180], slA: [40, 52] },
+  { from: 4, gapN: 3, p: [0.2, 0.34], mix: [0.45, 0.65, 1],   // Profi vodák
+    chL: [560, 1000], chH: [68, 56], chD: [90, 150], chBend2: 0.5,
+    gaL: [560, 820], gaH: [58, 48], gaCell: 72, gaFill: [0.55, 0.68],
+    slK: [4, 6], slT: [0.84, 0.72], slGap: [185, 165], slA: [44, 56] },
+];
+// centre line of a lane feature at world x (piecewise linear through g.lane)
+function laneY(g, x) {
+  const L = g.lane;
+  if (x <= L[0][0]) return L[0][1];
+  if (x >= L[L.length - 1][0]) return L[L.length - 1][1];
+  let lo = 0, hi = L.length - 1;
+  while (hi - lo > 1) { const m = (lo + hi) >> 1; if (L[m][0] <= x) lo = m; else hi = m; }
+  const t = (x - L[lo][0]) / (L[hi][0] - L[lo][0]);
+  return L[lo][1] + (L[hi][1] - L[lo][1]) * t;
+}
+
 // ─── Course: lazily generated, fully determined by the seed ────────────────
 class Course {
-  constructor(seed, level = 1) {
+  // ctrl = CTRL.ride builds the free-ride river (průplavy, slalomy, zahrady); anything else is the classic river,
+  // which must stay byte-identical (RULES = 2).
+  constructor(seed, level = 1, ctrl = 0) {
     this.seed = seed >>> 0;
+    this.ride = ctrl === 1;           // CTRL.ride
+    this.P = this.ride ? RIDE_FEAT[levelOf(level).id] : null;
+    this.lastFeat = -99; this.sl = 0; this.slSide = 1; this.slC = 0; this.afterLane = false;
     this.lv = levelOf(level);
     this.level = this.lv.id;
     this.sb1 = hash32(this.seed, 0xB1);
@@ -157,6 +195,19 @@ class Course {
     if (n >= lv.bridgeFrom && n - this.lastBridge >= 9 && R(4) < 0.24) kind = 'bridge';
 
     const flipHere = n === this.nextFlip;
+    // RIDE only: průplav / zahrada / slalom (all draws use keys >= 200, so classic rivers never see them)
+    let feat = '';
+    if (this.ride) {
+      if (flipHere) this.sl = 0;                       // a reversal ends a slalom (its slack water needs the room)
+      feat = this._pickFeat(n, e, flipHere);
+      if (this.sl > 0) {
+        kind = 'rocks';                                // slalom = short rock columns
+        spacing = this.speedAt(this.lastX) * lerp(this.P.slT[0], this.P.slT[1], e) + (R(204) - 0.5) * 12;
+        gap = lerp(this.P.slGap[0], this.P.slGap[1], e) + (R(205) - 0.5) * 8;
+      }
+      if (feat) { kind = feat; maxD = Math.min(maxD, 150); }   // the narrow mouth of a průplav / zahrada sits close to the previous opening
+      if (this.afterLane) maxD = Math.min(maxD, 120);  // the boat leaves a průplav pinned to its line: the next opening is close
+    }
     if (flipHere) {
       // room for the whole slack-water zone between two gates, the flip line in the middle
       spacing = Math.max(spacing, 2 * lv.flipW + 240);
@@ -183,7 +234,10 @@ class Course {
       lo = Math.max(lo, o.cy - d); hi = Math.min(hi, o.cy + d);
     }
 
-    if (kind === 'bridge') {
+    let xEnd = x;
+    if (kind === 'channel' || kind === 'garden') {
+      xEnd = this._laneFeature(g, kind, x, lo, hi, e, n);
+    } else if (kind === 'bridge') {
       this.lastBridge = n;
       let m = RIVER_H / 2 + (R(8) - 0.5) * 120;
       m = clamp(m, lo + 40, hi - 40);
@@ -205,7 +259,14 @@ class Course {
       let u = R(5);
       const prev = this.prevOpen[0].cy;
       if ((n & 3) === 1) u = prev > RIVER_H / 2 ? u * 0.5 : 0.5 + u * 0.5;
-      const cy = lerp(a, b, u);
+      let cy = lerp(a, b, u);
+      if (this.ride && this.sl > 0) {                  // slalom: alternate around a centre line fixed at its first gate
+        const A = lerp(this.P.slA[0], this.P.slA[1], e);
+        if (this.slC < 0) this.slC = clamp(prev, bandLo + A, bandHi - A);
+        cy = clamp(this.slC + this.slSide * A, a, b);
+        this.slSide = -this.slSide; this.sl--;
+        g.slalom = true;
+      }
       const top = cy - gap / 2, bot = cy + gap / 2;
       if (kind === 'rocks') {
         this._rockCol(g, x, top, -1, n, 30);
@@ -217,7 +278,7 @@ class Course {
         const lr = 15;
         g.shapes.push({ t: 1, x1: x, y1: -150, x2: x, y2: top - lr, r: lr, v: 0 });
         g.shapes.push({ t: 1, x1: x, y1: bot + lr, x2: x, y2: RIVER_H + 150, r: lr, v: 1 });
-        g.move = { amp, period: Math.round(lerp(330, 210, clamp((n - lv.boomFrom) / 60, 0, 1)) / lv.speed), phase: R(7) };
+        g.move = { amp, period: Math.round(lerp(330, 210, clamp((n - lv.boomFrom) / 60, 0, 1)) / lv.speed * (this.ride ? RIDE_BOOM_SLOW : 1)), phase: R(7) };
       }
       g.open.push({ cy, gap, amp });
     }
@@ -252,18 +313,102 @@ class Course {
         this.stars.push({ id: this.stars.length, x: this.lastX + spacing * f, y });
       }
     }
-    if (n >= 2 && !g.move && R(24) < 0.24) {
+    if (g.lane) {                                      // RIDE: stars on the line of a channel / garden mark the safe path
+      if (R(210) < 0.7) for (const f of [0.3, 0.55, 0.8]) {
+        const sx = x + (xEnd - x) * f;
+        this.stars.push({ id: this.stars.length, x: sx, y: laneY(g, sx) + (R(211 + f * 10) - 0.5) * g.lh * 0.6 });
+      }
+    } else if (n >= 2 && !g.move && R(24) < 0.24) {
       const o = g.open[Math.floor(R(25) * g.open.length)];
       const side = R(26) < 0.5 ? -1 : 1;
       this.stars.push({ id: this.stars.length, x, y: o.cy + side * (o.gap / 2 - 30) });
     }
 
     this.gates.push(g);
-    this.prevOpen = g.open;
+    this.prevOpen = g.exitOpen || g.open;
+    this.afterLane = !!g.lane;
     this.lastKind = kind;
-    this.lastX = x;
-    this.genX = x;
+    this.lastX = xEnd;
+    this.genX = xEnd;
     this.n++;
+  }
+
+  // RIDE: should gate n open a feature? Slalom parts are tracked in this.sl (gates still to come).
+  _pickFeat(n, e, flipHere) {
+    const P = this.P, R = k => this.r(n, k);
+    if (this.sl > 0) { this.lastFeat = n; return ''; }
+    if (flipHere || n < P.from || n - this.lastFeat < P.gapN || this.lastKind === 'bridge' || R(200) >= lerp(P.p[0], P.p[1], e)) return '';
+    const u = R(201);
+    this.lastFeat = n;
+    if (u < P.mix[0]) return 'channel';
+    if (u < P.mix[1]) return 'garden';
+    this.sl = Math.round(lerp(P.slK[0], P.slK[1], R(202))); this.slSide = R(203) < 0.5 ? -1 : 1; this.slC = -1;
+    return '';
+  }
+
+  // RIDE: a centre line from x0 over L (1-2 eased S-bends), then log walls (channel) or a boulder field (garden).
+  _laneFeature(g, kind, x0, lo, hi, e, n) {
+    const P = this.P, R = k => this.r(n, k);
+    const ch = kind === 'channel';
+    const L = Math.round(lerp(ch ? P.chL[0] : P.gaL[0], ch ? P.chL[1] : P.gaL[1], R(220)) / LANE_STEP) * LANE_STEP;
+    const h = lerp(ch ? P.chH[0] : P.gaH[0], ch ? P.chH[1] : P.gaH[1], e) + (R(221) - 0.5) * 6;
+    const margin = ch ? WALL_R * 2 + 10 : 6;
+    const bLo = BANK_MAX + 24 + h + margin, bHi = RIVER_H - BANK_MAX - 24 - h - margin;
+    // entry centre: reachable from the previous opening(s), like any other gate
+    let a = Math.max(lo, bLo), b = Math.min(hi, bHi);
+    if (a > b) { const c = clamp((lo + hi) / 2, bLo, bHi); a = b = c; }
+    const c0 = lerp(a, b, R(222));
+    const nb = ch && R(223) < P.chBend2 ? 2 : 1;
+    const D = ch ? lerp(P.chD[0], P.chD[1], e) : lerp(60, 120, e);
+    const cps = [c0];
+    for (let i = 0; i < nb; i++) {
+      const prev = cps[i];
+      let dir = R(224 + i) < 0.5 ? -1 : 1;
+      if (prev + dir * D * 0.5 > bHi || prev + dir * D * 0.5 < bLo) dir = -dir;
+      cps.push(clamp(prev + dir * D * (0.5 + 0.5 * R(226 + i)), bLo, bHi));
+    }
+    const lane = [], steps = L / LANE_STEP, per = steps / nb;
+    for (let i = 0; i <= steps; i++) {
+      const seg = Math.min(nb - 1, Math.floor(i / per)), f = (i - seg * per) / per;
+      lane.push([x0 + i * LANE_STEP, cps[seg] + (cps[seg + 1] - cps[seg]) * ease(f)]);
+    }
+    g.lane = lane; g.lh = h;
+    const x1 = x0 + L, cEnd = lane[lane.length - 1][1];
+    g.open.push({ cy: c0, gap: 2 * h, amp: 0 });
+    g.exitOpen = [{ cy: cEnd, gap: 2 * h, amp: 0 }];
+    g.x2 = x1;
+    g.pts = Math.max(2, Math.round(L / 300));          // a long stretch pays like several gates (one Serie step)
+    if (ch) {
+      // log fence: entry post from the bank, lashed logs along both edges, exit post back to the bank
+      for (const dir of [-1, 1]) {
+        const off = dir * (h + WALL_R), far = dir < 0 ? -110 : RIVER_H + 110;
+        g.shapes.push({ t: 1, x1: x0 + (R(230 + dir) - 0.5) * 40, y1: far, x2: lane[0][0], y2: lane[0][1] + off, r: WALL_R, v: (n * 7 + dir) & 1023 });
+        for (let i = 0; i + 1 < lane.length; i++)
+          g.shapes.push({ t: 1, x1: lane[i][0], y1: lane[i][1] + off, x2: lane[i + 1][0], y2: lane[i + 1][1] + off, r: WALL_R, v: (n * 31 + i * 2 + dir) & 1023, wall: 1 });
+        g.shapes.push({ t: 1, x1: x1, y1: cEnd + off, x2: x1 + (R(232 + dir) - 0.5) * 40, y2: far, r: WALL_R, v: (n * 13 + dir) & 1023 });
+      }
+    } else {
+      // boulder field over the whole width; every rock keeps >= h + r from the centre line
+      const cell = P.gaCell, fill = lerp(P.gaFill[0], P.gaFill[1], e);
+      const yTop = BANK_MAX + 10, yBot = RIVER_H - BANK_MAX - 10;
+      let k = 0;
+      for (let cx = x0; cx < x1 + 1; cx += cell) {
+        for (let cy = yTop; cy < yBot; cy += cell, k++) {
+          if (R(300 + k * 4) >= fill) continue;
+          const r = 15 + R(301 + k * 4) * 12;
+          const rx = Math.min(x1, cx + R(302 + k * 4) * cell * 0.8), ry = clamp(cy + R(303 + k * 4) * cell, yTop + r * 0.3, yBot - r * 0.3);
+          let ok = true;
+          for (let i = 0; i + 1 < lane.length && ok; i++) {
+            if (lane[i + 1][0] < rx - 200 || lane[i][0] > rx + 200) continue;
+            const rr = h + r;
+            if (segDist2(rx, ry, lane[i][0], lane[i][1], lane[i + 1][0], lane[i + 1][1]) < rr * rr) ok = false;
+          }
+          if (ok && rx < x0 + 6 && Math.abs(ry - c0) < h + r) ok = false;
+          if (ok) g.shapes.push({ t: 0, x: rx, y: ry, r, v: (n * 97 + k) & 1023 });
+        }
+      }
+    }
+    return x1;
   }
 
   _rockCol(g, gx, edge, dir, n, k) {
@@ -428,16 +573,18 @@ const RIDE_UP = 1, RIDE_DOWN = 2, RIDE_POWER = 4, RIDE_MASK = 7;
 // Paddling costs Síla; it returns while gliding (3× in slack water), from stars and near misses. Gates passed
 // without running dry build the Série: ×2 after 5, FLOW ×3 after 15 (strokes at half price).
 // Only + − × ÷, Math.floor/min and comparisons: bit-deterministic like the classic Sim.
-const RIDE_RULES = 1;   // bump on ANY change to RideSim, RIDE_LEVELS or DRIVE (classic RULES stays 2)
+const RIDE_RULES = 2;   // bump on ANY change to RideSim, RIDE_LEVELS or DRIVE (classic RULES stays 2)
 const DRIVE = [15, 39, 55, 63, 63, 55, 39, 15], DRIVE_SUM = 344;
 const RIDE_BASE = { drift: 65, drag: 3.5, J0: 230, J1: 440, vHull: 950, iSlow: 18, iFast: 14, switchGap: 9,
   tempoUp: 0.6, tempoDecay: 1.6, glide: 18, cost0: 2, cost1: 3.2, regen: 24, calmRegen: 2, tiredRegen: 0.5,
-  eLow: 25, fMin: 0.5, tCap: 0.6, eBack: 35, starE: 25, nearE: 10, m2: 5, m3: 15, flowCost: 0.5, graceGates: 3, graceE: 30 };
+  eLow: 25, fMin: 0.5, tCap: 0.6, eBack: 35, starE: 25, nearE: 10, m2: 5, m3: 15, flowCost: 0.5, graceGates: 3, graceE: 30,
+  // forward drive (rychlost): every stroke adds bv to the boost (a fraction of the course speed), which fades at bDecay/s
+  bv: 0.038, bCap: 0.24, bFlow: 1.2, bDecay: 1.0, bCost: 2, bTired: 0.25, bFast: 0.7, bTurbo: 0.93 };
 const RIDE_LEVELS = [
   Object.assign({}, RIDE_BASE, { drift: 45, drag: 4.5, J0: 210, J1: 380, vHull: 800, iSlow: 20, tempoUp: 0.45,
-    cost0: 1.5, cost1: 2.4, regen: 30, fMin: 0.6, tCap: 1 }),   // Děti
+    cost0: 1.5, cost1: 2.4, regen: 30, fMin: 0.6, tCap: 1, bv: 0.026, bCap: 0.15 }),   // Děti
   Object.assign({}, RIDE_BASE),                               // Normální
-  Object.assign({}, RIDE_BASE, { drift: 80, regen: 20 }),     // Profi vodák
+  Object.assign({}, RIDE_BASE, { drift: 80, regen: 20, bv: 0.044, bCap: 0.30 }),     // Profi vodák
 ];
 class RideSim extends Sim {
   constructor(course) {
@@ -447,6 +594,7 @@ class RideSim extends Sim {
     this.dk = 8; this.dJ = 0; this.side = 1; this.dir = 0;
     this.tired = false; this.tiredCount = 0; this.streak = 0; this.bestStreak = 0;
     this.mult = 1; this.meter = 0; this.flowOn = false; this.nears = 0;
+    this.boost = 0;                                   // forward drive, fraction of the course speed
   }
   step(inp) {
     if (!this.alive) return;
@@ -482,8 +630,9 @@ class RideSim extends Sim {
     if (this.dk < 8) { this.vy += this.dJ * DRIVE[this.dk] / DRIVE_SUM; this.dk++; }
     this.vy = w + (this.vy - w) * (1 - K.drag * DT);
     const md = c.lv.maxDrift; if (this.vy > md) this.vy = md; else if (this.vy < -md) this.vy = -md;
-    // 4) forward motion, hitboxes, gates: identical to Sim (course timing and moving booms unchanged)
-    this.vx = c.speedAt(this.x); this.x += this.vx * DT; this.y += this.vy * DT; this.tick++;
+    // 4) forward motion = the river's own speed x (1 + boost); hitboxes and gates as in Sim
+    this.boost -= this.boost * K.bDecay * DT;
+    this.vx = c.speedAt(this.x) * (1 + this.boost); this.x += this.vx * DT; this.y += this.vy * DT; this.tick++;
     this._collide(); if (this.alive) this._progress();
   }
   _stroke(d, w) {
@@ -493,7 +642,9 @@ class RideSim extends Sim {
     const J = K.J0 + (K.J1 - K.J0) * this.tempo;      // rhythm builds power
     const fE = this.E >= K.eLow ? 1 : K.fMin + (1 - K.fMin) * this.E / K.eLow;   // tired arms, never zero
     this.dJ = d * J * fE * eff; this.dk = 0;
-    let cost = this.tired ? 0 : K.cost0 + K.cost1 * this.tempo;
+    let cost = this.tired ? 0 : K.cost0 + K.cost1 * this.tempo + K.bCost * this.boost / K.bCap;
+    const cap = this.flowOn ? K.bCap * K.bFlow : K.bCap;     // the drive: any stroke, in any direction, pushes the boat on
+    if (this.boost < cap) { this.boost += K.bv * (this.tired ? K.bTired : fE); if (this.boost > cap) this.boost = cap; }
     if (this.flowOn) cost *= K.flowCost;              // FLOW: half price
     this.E -= cost;
     if (this.gatesPassed < K.graceGates && this.E < K.graceE) this.E = K.graceE;   // onboarding grace
@@ -518,9 +669,10 @@ class RideSim extends Sim {
       const g = c.gates[this.nextGate], near = this.gateClear < 7;
       this.nextGate++; this.gatesPassed++;
       this._setStreak(this.streak + 1);                // the gate that completes a tier already pays the new mult
-      this.score += this.mult;
+      const sp = this.boost / K.bCap, bonus = sp >= K.bTurbo ? 2 : sp >= K.bFast ? 1 : 0;   // speed pays a flat bonus
+      this.score += this.mult * (g.pts || 1) + bonus;
       if (near) { this.nears++; this.E += K.nearE; if (this.E > 100) this.E = 100; }
-      this.events.push({ type: 'gate', n: g.n, near, pts: this.mult, mult: this.mult });
+      this.events.push({ type: 'gate', n: g.n, near, pts: this.mult * (g.pts || 1) + bonus, mult: this.mult, bonus, kind: g.kind });
       this.gateClear = 1e9;
     }
     const st = c.stars;
@@ -538,23 +690,191 @@ class RideSim extends Sim {
 }
 // A human-ish free-ride pilot (tests, attract): aims at the nearest opening and holds toward it unless the
 // boat would already glide there if released now.
-function pilotRide(sim, lead = 0.8, db = 18) {
+function pilotRide(sim, lead = 0.8, db = 18, look = 70) {
   const c = sim.c, g = c.gates[sim.nextGate];
   if (!g) return 0;
-  const eta = Math.max(0, (g.x - sim.x) / sim.vx);
-  const off = g.move ? moveOffset(g.move, sim.tick + eta * TICK_RATE) : 0;
-  let best = g.open[0];
-  for (const o of g.open) if (Math.abs(o.cy + off - sim.y) < Math.abs(best.cy + off - sim.y)) best = o;
-  const ty = best.cy + off, K = sim.K, w = c.flowAt(sim.x) * K.drift;
+  let ty, eta;
+  if (g.lane && sim.x + look >= g.x) { ty = laneY(g, sim.x + look); eta = look / sim.vx; }   // inside a průplav / zahrada: follow the line
+  else {
+    eta = Math.max(0, (g.x - sim.x) / sim.vx);
+    const off = g.move ? moveOffset(g.move, sim.tick + eta * TICK_RATE) : 0;
+    let best = g.open[0];
+    for (const o of g.open) if (Math.abs(o.cy + off - sim.y) < Math.abs(best.cy + off - sim.y)) best = o;
+    ty = best.cy + off;
+  }
+  const K = sim.K, w = c.flowAt(sim.x) * K.drift;
   const coast = sim.y + (sim.vy - w) / K.drag * lead + w * Math.min(eta, 0.5);
   const err = coast - ty;
   return err > db ? RIDE_UP : err < -db ? RIDE_DOWN : 0;
 }
 //__RIDE_PHYSICS_END__
+//__SLALOM_BEGIN__
+// ─── Slalom na čas: a finite course of pole gates, a clock and penalties (no death) ───────────────
+// Time = finish tick + penalty ticks (120/s). The replay "score" is SL_CAP − time, so every
+// "higher is better" mechanism of the game (records, challenges, ranking) works unchanged.
+// Uses the paddling and forward-drive model of free ride (RideSim) with a wider speed range.
+const SLALOM_RULES = 1;       // bump on ANY change to SlalomCourse, SlalomSim, SL_LEVELS, SL_K (also invalid after a RIDE_RULES bump)
+const SL_CAP = 600000;
+const POLE_R = 5;
+// pen in ticks: touch = pole touched, miss = gate missed, rock = boulder, bank = bank contact
+const SL_LEVELS = [
+  { n: 16, vBase: 150, first: 520, spacing: [440, 400], gap: [290, 260], step: [40, 140], reach: 0.62, tight: 0, chic: 0, rocks: 0, flips: [],
+    pen: { touch: 120, miss: 1200, rock: 240, bank: 0 } },                       // Děti: 1 s / 10 s / 2 s / –
+  { n: 22, vBase: 175, first: 520, spacing: [400, 340], gap: [255, 205], step: [50, 170], reach: 0.55, tight: 0.38, redReach: 1.1, redStep: 260, chic: 2, rocks: 0.3, flips: [8, 15],
+    pen: { touch: 240, miss: 2400, rock: 600, bank: 120 } },                     // Normální: 2 s / 20 s / 5 s / 1 s
+  { n: 26, vBase: 195, first: 520, spacing: [370, 300], gap: [215, 165], step: [60, 210], reach: 0.58, tight: 0.42, redReach: 1.1, redStep: 250, chic: 4, rocks: 0.4, flips: [5, 11, 18],
+    pen: { touch: 240, miss: 2400, rock: 600, bank: 120 } },                     // Profi vodák: 2 s / 20 s / 5 s / 1 s
+];
+// the boat's drive is stronger here (vs free ride) because the base speed is lower and the course short
+const slalomK = lv => { const k = Object.assign({}, RIDE_LEVELS[lv]); k.bCap = lv === 0 ? 0.36 : 0.46; k.bv = k.bCap / 4.5; k.bFlow = 1; return k; };
+const SL_K = [slalomK(0), slalomK(1), slalomK(2)];
+class SlalomCourse extends Course {
+  constructor(seed, level = 1) {
+    super(seed, level);
+    const S = this.sl = SL_LEVELS[this.level];
+    this.finite = true;
+    this.sbiome = hash32(this.seed, 0xB5) % 5;
+    const red = new Set();   // red "obrat" pairs (tight chicanes), spread evenly, jittered by the seed
+    for (let j = 0; j < S.chic; j++) red.add(Math.floor((S.n - 4) * (j + 0.5) / S.chic + (this.r(900, j) - 0.5) * 2) + 2);
+    let x = S.first, cy = RIVER_H / 2, dir = this.r(901, 0) < 0.5 ? -1 : 1;
+    const lo0 = BANK_MAX + 26 + POLE_R;
+    this.rockCount = 0;
+    for (let i = 0; i < S.n; i++) {
+      const R = k => this.r(i, k), t = i / (S.n - 1);
+      const gap = lerp(S.gap[0], S.gap[1], t) + (R(2) - 0.5) * 8;
+      let sp = lerp(S.spacing[0], S.spacing[1], t) + (R(1) - 0.5) * 30;
+      const isRed = red.has(i) || red.has(i - 1);
+      if (isRed) sp *= S.tight;
+      const flipGate = S.flips.indexOf(i) >= 0;
+      if (flipGate) sp = Math.max(sp, 2 * this.lv.flipW + 200);
+      if (i > 0) x += sp;
+      if (flipGate && this.lv.flipW > 0) this.flips.push(x - sp * 0.5);
+      const u = R(3);
+      let st = lerp(S.step[0], S.step[1], u * (0.5 + 0.5 * u) * (0.6 + 0.4 * t));
+      const cap = S.reach * sp + 30;            // reachability by construction
+      if (st > cap) st = cap;
+      if (i === 0) st = 0;
+      if (red.has(i)) { /* A of a chicane keeps going the same way */ }
+      else if (red.has(i - 1)) { dir = -dir; st = Math.min(S.redStep, S.redReach * sp + 30); }   // B: the sharp reversal
+      else if (i > 0 && R(4) > 0.22) dir = -dir;                                                 // mostly alternate sides
+      const half = gap / 2 + POLE_R, lo = lo0 + half, hi = RIVER_H - lo0 - half;
+      let ny = cy + dir * st;
+      if (ny < lo || ny > hi) { dir = -dir; ny = clamp(cy + dir * st, lo, hi); }
+      cy = ny;
+      const g = { n: i, x, kind: isRed ? 'red' : 'green', cy, gap, half, shapes: [], open: [{ cy, gap, amp: 0 }], move: null, halfW: POLE_R + 4, passX: x, biome: this.sbiome, rocks: [] };
+      g.shapes.push({ t: 0, x, y: cy - half, r: POLE_R, v: 0 }, { t: 0, x, y: cy + half, r: POLE_R, v: 1 });
+      if (i > 2 && !isRed && !red.has(i - 2) && R(10) < S.rocks) {   // boulder on the straight line from the previous gate
+        const py = this.gates[i - 1].cy, rr = 22 + R(11) * 10;
+        g.rocks.push({ id: ++this.rockCount, x: x - sp * (0.4 + 0.2 * R(12)), y: lerp(py, cy, 0.5) + (R(13) - 0.5) * 50, r: rr });
+      }
+      this.gates.push(g);
+    }
+    this.finishX = x + 460;
+    this.genX = 1e12;
+    this.n = S.n;
+  }
+  ensure() {}
+  speedAt() { return this.sl.vBase; }
+  biomeAt() { return this.sbiome; }
+}
+class SlalomSim extends RideSim {
+  constructor(course) {
+    super(course);
+    this.K = SL_K[course.level]; this.S = course.sl;
+    this.boost = 0; this.vx = this.S.vBase;
+    this.pen = 0; this.touches = 0; this.misses = 0; this.rockHits = 0; this.bankHits = 0;
+    this.cross = 0; this.retire = 0; this.tmask = 0; this.curMiss = false; this.rockSeen = []; this.bankCool = 1e9; this.cleanGates = 0;
+    this.finished = false; this.finishTick = -1; this.splits = [];
+  }
+  clone() { const s = super.clone(); s.rockSeen = this.rockSeen.slice(); s.splits = this.splits.slice(); return s; }
+  get total() { return (this.finished ? this.finishTick : this.tick) + this.pen; }
+  _penalty(kind, x, y) {
+    const t = this.S.pen[kind]; if (!t) return;
+    this.pen += t; this.events.push({ type: 'pen', kind, ticks: t, x, y });
+  }
+  _collide() {
+    const c = this.c, [hx, hy] = this.heading();
+    let bank = false;
+    for (let i = 0; i < 3; i++) {                        // banks: soft wall, bounce
+      const o = PHYS.hitOff[i], r = PHYS.hitR[i] * c.lv.hit, px = this.x + hx * o, py = this.y + hy * o;
+      const top = c.bankTop(px) + r, bot = c.bankBot(px) - r;
+      if (py < top) { this.y += top - py; if (this.vy < 0) this.vy = -this.vy * 0.3; bank = true; }
+      else if (py > bot) { this.y -= py - bot; if (this.vy > 0) this.vy = -this.vy * 0.3; bank = true; }
+    }
+    if (bank) {
+      this.boost *= 0.97;
+      if (this.bankCool > 30) { this.bankHits++; this._penalty('bank', this.x, this.y); this.boost *= 0.6; }
+      this.bankCool = 0;
+    } else this.bankCool++;
+    const g1 = Math.min(c.gates.length - 1, this.retire + 1);
+    for (let gi = this.retire; gi <= g1; gi++) {
+      const g = c.gates[gi];
+      if (gi === this.retire) for (let si = 0; si < 2; si++) {   // poles: pass through, +touch once per pole
+        if ((this.tmask >> si) & 1) continue;
+        const s = g.shapes[si];
+        for (let i = 0; i < 3; i++) {
+          const o = PHYS.hitOff[i], rr = PHYS.hitR[i] * c.lv.hit + s.r;
+          const dx = this.x + hx * o - s.x, dy = this.y + hy * o - s.y;
+          if (dx * dx + dy * dy < rr * rr) {
+            this.tmask |= 1 << si;
+            this.touches++; this.boost *= 0.85; this._penalty('touch', s.x, s.y); this.events.push({ type: 'pole', gate: g.n, side: si });
+            break;
+          }
+        }
+      }
+      for (const rk of g.rocks) {                         // boulders: slide round them, penalty once per rock
+        if (this.x + 50 < rk.x - rk.r || this.x - 50 > rk.x + rk.r) continue;
+        for (let i = 0; i < 3; i++) {
+          const o = PHYS.hitOff[i], hr = PHYS.hitR[i] * c.lv.hit, rr = rk.r + hr;
+          const px = this.x + hx * o, py = this.y + hy * o, dx = px - rk.x, dy = py - rk.y;
+          if (dx * dx + dy * dy < rr * rr) {
+            const side = dy < 0 ? -1 : 1, ny = rk.y + side * Math.sqrt(rr * rr - dx * dx);
+            this.y += ny - py; if (this.vy * side < 0) this.vy = -this.vy * 0.4;
+            this.boost *= 0.9;
+            if (this.rockSeen.indexOf(rk.id) < 0) { this.rockSeen.push(rk.id); this.rockHits++; this.boost *= 0.5; this._penalty('rock', px, py); }
+          }
+        }
+      }
+    }
+  }
+  _progress() {
+    const c = this.c, gs = c.gates;
+    while (this.cross < gs.length && this.x >= gs[this.cross].x) {      // crossing the gate line: centre between the poles?
+      const g = gs[this.cross], f = (g.x - this.px) / (this.x - this.px || 1), yc = this.py + (this.y - this.py) * f;
+      const inside = yc > g.cy - g.half && yc < g.cy + g.half;
+      this.cross++; this.curMiss = !inside;
+      if (!inside) { this.misses++; this._penalty('miss', g.x, yc); this._setStreak(0); }
+      this.splits.push(this.tick + this.pen);
+      this.events.push({ type: 'gate', n: g.n, ok: inside, near: false, pts: 0 });
+    }
+    this.nextGate = this.cross < gs.length ? this.cross : gs.length - 1;
+    this.nextGate = this.cross < gs.length ? this.cross : gs.length - 1;
+    while (this.retire < this.cross && this.x > gs[this.retire].x + 40) {   // gate left behind: clean or not
+      if (this.tmask === 0 && !this.curMiss) { this.cleanGates++; this._setStreak(this.streak + 1); } else if (this.tmask) this._setStreak(0);
+      this.retire++; this.tmask = 0; this.curMiss = false; this.gatesPassed = this.retire;
+    }
+    if (this.x >= c.finishX) {
+      this.finished = true; this.finishTick = this.tick; this.alive = false; this.deathTick = this.tick;
+      this.score = SL_CAP - (this.tick + this.pen);
+      this.events.push({ type: 'finish', total: this.tick + this.pen });
+    }
+  }
+}
+function runSlalom(seed, inputs, level = 1, maxTicks = TICK_RATE * 60 * 5) {
+  const sim = new SlalomSim(new SlalomCourse(seed, level));
+  let ii = 0, st = 0;
+  while (sim.alive && sim.tick < maxTicks) {
+    while (ii < inputs.length && inputs[ii][0] <= sim.tick) st = inputs[ii++][1] & 3;
+    sim.step(st); sim.events.length = 0;
+  }
+  return sim;
+}
+//__SLALOM_END__
+
 
 // Replay a free-ride run headlessly; inputs = [[tick, state], …] (state holds until the next change)
 function runRide(seed, inputs, maxTicks = TICK_RATE * 60 * 45, level = 1) {
-  const sim = new RideSim(new Course(seed, level));
+  const sim = new RideSim(new Course(seed, level, CTRL.ride));
   let ii = 0, st = 0;
   while (sim.alive && sim.tick < maxTicks) {
     while (ii < inputs.length && inputs[ii][0] <= sim.tick) st = inputs[ii++][1] & RIDE_MASK;
@@ -580,7 +900,7 @@ function runReplay(seed, taps, maxTicks = TICK_RATE * 60 * 45, level = 1) {
 // ─── Challenge codes: seed + run replay, checksummed, base64url ────────────
 const CODE_PREFIX = 'PRJ1-';
 // control schemes: classic tap strokes, or free ride (held up/down paddling)
-const CTRL = { tap: 0, ride: 1 };
+const CTRL = { tap: 0, ride: 1, slalom: 2 };
 const MODES = { free: 0, daily: 1, river: 2 };
 const _td = new TextDecoder();
 function b64uEnc(bytes) {
@@ -613,9 +933,10 @@ const Replay = {
     const w = [];
     const vu = v => { v = Math.max(0, Math.floor(v)); while (v >= 128) { w.push((v & 127) | 128); v = Math.floor(v / 128); } w.push(v); };
     const str = (s, max) => { const b = _te.encode(cleanText(s, max)); vu(b.length); for (const x of b) w.push(x); };
-    const ride = r.ctrl === CTRL.ride;
-    w.push(ride ? 5 : 3, RULES, r.mode & 255, levelOf(r.level).id);
-    if (ride) w.push(CTRL.ride, RIDE_RULES);
+    const slalom = r.ctrl === CTRL.slalom, ride = r.ctrl === CTRL.ride || slalom;
+    w.push(slalom ? 6 : ride ? 5 : 3, RULES, r.mode & 255, levelOf(r.level).id);
+    if (ride) w.push(slalom ? CTRL.slalom : CTRL.ride, RIDE_RULES);
+    if (slalom) w.push(SLALOM_RULES);
     const sd = r.seed >>> 0; w.push(sd & 255, (sd >>> 8) & 255, (sd >>> 16) & 255, sd >>> 24);
     vu(r.score); vu(r.endTick); vu(r.pauses | 0);
     str(r.name, 16); str(r.label, 32);
@@ -659,15 +980,17 @@ const Replay = {
     const vu = () => { let v = 0, mul = 1; for (let i = 0; i < 6; i++) { const x = u8(); v += (x & 127) * mul; if (!(x & 128)) return v; mul *= 128; } throw bad(); };
     const str = n => { const l = vu(); if (l > 200) throw bad(); need(l); const s = _td.decode(b.subarray(p, p + l)); p += l; return cleanText(s, n); };
     const ver = u8();
-    if (ver < 1 || ver > 5) throw new Error('Kód je z novější verze hry.');
+    if (ver < 1 || ver > 6) throw new Error('Kód je z novější verze hry.');
     const rules = ver === 1 ? 1 : u8();
     if (rules !== RULES) throw new Error('Kód je ze starší verze pravidel hry — přehrát ho nejde.');
     const mode = u8();
     const level = ver >= 3 ? u8() : 1;
     if (level > 2) throw bad();
     const ctrl = ver >= 4 ? u8() : CTRL.tap;
-    if (ctrl > CTRL.ride) throw new Error('Kód je z novější verze hry.');
+    if (ctrl > CTRL.slalom) throw new Error('Kód je z novější verze hry.');
+    if (ver === 6 && ctrl !== CTRL.slalom) throw bad();
     if (ctrl === CTRL.ride && (ver !== 5 || u8() !== RIDE_RULES)) throw new Error('Kód je ze starší verze Volné jízdy — přehrát ho nejde.');
+    if (ctrl === CTRL.slalom && (ver !== 6 || u8() !== RIDE_RULES || u8() !== SLALOM_RULES)) throw new Error('Kód je ze starší verze Slalomu — přehrát ho nejde.');
     need(4);
     const seed = (b[p] | (b[p + 1] << 8) | (b[p + 2] << 16) | (b[p + 3] << 24)) >>> 0; p += 4;
     const score = vu(), endTick = vu();
@@ -676,7 +999,7 @@ const Replay = {
     const n = vu();
     if (endTick < 1 || endTick > MAX_RUN_TICKS || n > endTick) throw bad();
     let prev = -1;
-    if (ctrl === CTRL.ride) {
+    if (ctrl >= CTRL.ride) {
       const inputs = new Array(n);
       let ps = 0;
       for (let i = 0; i < n; i++) {
@@ -695,6 +1018,10 @@ const Replay = {
   },
   // A genuine run dies exactly at endTick with exactly the claimed score.
   verify(r) {
+    if (r.ctrl === CTRL.slalom) {   // the time and every penalty must be reproduced exactly
+      const sm = runSlalom(r.seed, r.inputs, r.level, r.endTick);
+      return { ok: sm.finished && sm.finishTick === r.endTick && sm.score === r.score, score: sm.score, endTick: sm.finishTick, sim: sm };
+    }
     const sim = r.ctrl === CTRL.ride ? runRide(r.seed, r.inputs, r.endTick, r.level) : runReplay(r.seed, r.taps, r.endTick, r.level);
     return { ok: !sim.alive && sim.score === r.score && sim.deathTick === r.endTick, score: sim.score, endTick: sim.deathTick, sim };
   },
@@ -1673,7 +2000,7 @@ function createAudioEngine(opts) {
 
   const METHODS = ['unlock', 'setVolumes', 'setMuted', 'setPaused', 'startAmbience', 'stopAmbience',
     'setScene', 'startMusic', 'stopMusic', 'setMusicState', 'stroke', 'gate', 'star', 'nearMiss',
-    'flip', 'crash', 'record', 'ui', 'countdown', 'heartbeat'];
+    'flip', 'crash', 'record', 'ui', 'countdown', 'heartbeat', 'warn'];
   const G = (typeof globalThis !== 'undefined') ? globalThis : (typeof window !== 'undefined' ? window : {});
   let AC = null;
   try { AC = G.AudioContext || G.webkitAudioContext || null; } catch (e) { AC = null; }
@@ -2691,6 +3018,12 @@ function createAudioEngine(opts) {
     whoosh(ctx.currentTime, 0.32, 600, rnd(2400, 3200), 900, 0.09, 1.0, 1.8, -0.7 * d, 0.7 * d, 0.15);
   }
 
+  // Caution before slack water / a current reversal: two soft marimba notes
+  function sfxWarn() {
+    const t = ctx.currentTime, mel = getMel(currentKey());
+    marimba(0, SFX(), mtof(mel[8]), t, 0.2, -0.15, 0.25, 0.45, false);
+    marimba(0, SFX(), mtof(mel[5]), t + 0.16, 0.2, 0.15, 0.25, 0.6, false);
+  }
   // Low strength (free ride): a soft double thump, felt more than heard.
   function sfxHeartbeat() {
     const t = ctx.currentTime, n = [];
@@ -2883,6 +3216,7 @@ function createAudioEngine(opts) {
     crash: safe(function () { if (canPlay() && cnt[0] < MAX_SFX + 8) sfxCrash(); }),
     record: safe(function () { if (canPlay() && cnt[0] < MAX_SFX + 8) sfxRecord(); }),
     ui: safe(function (kind) { if (canPlay()) sfxUi(String(kind || 'click')); }),
+    warn: safe(function () { if (canPlay() && cnt[0] < MAX_SFX) sfxWarn(); }),
     heartbeat: safe(function () { if (canPlay() && cnt[0] < MAX_SFX) sfxHeartbeat(); }),
     countdown: safe(function (k) { if (canPlay() && cnt[0] < MAX_SFX + 4) sfxCountdown(num(k, 0)); }),
     isUnlocked: function () { return !!(ready && ctx && ctx.state === 'running'); },
@@ -2908,6 +3242,7 @@ function createAudioEngine(opts) {
 (() => {
 'use strict';
 
+const REVEAL_RIDE_EXTRA = 200;   // free ride: extra lookahead at full boost, keeps ~1.5 s of warning
 const REVEAL = 600;            // world units visible ahead of the boat — identical on every screen
 const CW = 512;                // land chunk width (world units)
 const TICK_MS = 1000 / TICK_RATE;
@@ -2946,7 +3281,7 @@ const Native = {
     if (isNative) {
       if (kind === 'record') nativeCall('Haptics', 'notification', { type: 'SUCCESS' });
       else nativeCall('Haptics', 'impact', { style: kind === 'crash' ? 'HEAVY' : kind === 'flip' ? 'MEDIUM' : 'LIGHT' });
-    } else if (navigator.vibrate) {
+    } else if (navigator.vibrate && (!navigator.userActivation || navigator.userActivation.hasBeenActive)) {
       try { navigator.vibrate(kind === 'crash' ? [40, 30, 80] : kind === 'record' ? [20, 40, 20] : kind === 'flip' ? 18 : 6); } catch { /* ignore */ }
     }
   },
@@ -2969,25 +3304,29 @@ const Store = {
   },
 };
 const reducedMotion = (() => { try { return matchMedia('(prefers-reduced-motion: reduce)').matches; } catch { return false; } })();
-const DEFAULTS = { name: '', sfx: 0.8, music: 0.5, amb: 0.7, ghosts: true, shake: !reducedMotion, haptics: true, hitbox: false, quality: 'auto', res: 'auto', frame: isNative ? 'full' : '1280', fps: false, water3d: false, coast: 'auto', rideTut: 0, tutorial: true, level: 1 };
+const DEFAULTS = { name: '', sfx: 0.8, music: 0.5, amb: 0.7, ghosts: true, shake: !reducedMotion, haptics: true, hitbox: false, quality: 'auto', muted: false, ctrl: 0, res: 'auto', frame: isNative ? 'full' : '1280', fps: false, water3d: false, coast: 'auto', rideTut: 0, tutorial: true, level: 1 };
+const freshInstall = !Store.get('settings', null) && !Store.get('records2', null);
 const S = Object.assign({}, DEFAULTS, Store.get('settings', {}));
+if (freshInstall) S.level = 0;
 const saveSettings = () => Store.set('settings', S);
 // Records are kept per difficulty level: a kids' score never competes with a pro's.
 const blankLevelRec = () => ({ free: { best: 0 }, seeds: {}, daily: {}, rivers: {} });
-const REC = Object.assign({ L: [], R: [], challenges: [], stats: { runs: 0, gates: 0, stars: 0, strokes: 0, dist: 0, time: 0 } }, Store.get('records2', {}));
-for (let i = 0; i < 3; i++) { REC.L[i] = Object.assign(blankLevelRec(), REC.L[i] || {}); REC.R[i] = Object.assign(blankLevelRec(), REC.R[i] || {}); }
+const REC = Object.assign({ L: [], R: [], S: [], challenges: [], stats: { runs: 0, gates: 0, stars: 0, strokes: 0, dist: 0, time: 0 } }, Store.get('records2', {}));
+for (let i = 0; i < 3; i++) { REC.L[i] = Object.assign(blankLevelRec(), REC.L[i] || {}); REC.R[i] = Object.assign(blankLevelRec(), REC.R[i] || {}); REC.S[i] = Object.assign(blankLevelRec(), REC.S[i] || {}); }
+// slalom times depend on both rule sets: a change in either starts that table afresh
+if (REC.slalomKey !== RIDE_RULES + ':' + SLALOM_RULES) { for (let i = 0; i < 3; i++) REC.S[i] = blankLevelRec(); REC.challenges = REC.challenges.filter(h => (h.ctrl | 0) !== CTRL.slalom); REC.slalomKey = RIDE_RULES + ':' + SLALOM_RULES; }
 // free-ride records from other ride rules (e.g. the unreleased placeholder) cannot be replayed: start clean
 if (REC.rideRules !== RIDE_RULES) { for (let i = 0; i < 3; i++) REC.R[i] = blankLevelRec(); REC.challenges = REC.challenges.filter(h => (h.ctrl | 0) !== CTRL.ride); REC.rideRules = RIDE_RULES; }
 // Old (rules v1) records cannot be verified under the new physics; only the lifetime stats carry over.
 if (!Store.get('records2', null)) { const old = Store.get('records', null); if (old && old.stats) Object.assign(REC.stats, old.stats); }
 // records per level and control scheme (classic taps / free ride)
-const LR = (lv, ctrl) => (ctrl === CTRL.ride ? REC.R : REC.L)[lv === 0 || lv === 2 ? lv : 1];
+const LR = (lv, ctrl) => (ctrl === CTRL.slalom ? REC.S : ctrl === CTRL.ride ? REC.R : REC.L)[lv === 0 || lv === 2 ? lv : 1];
 const levelName = lv => levelOf(lv).name;
 const seedHex = s => (s >>> 0).toString(16).padStart(8, '0');
 const saveRecords = () => {
   // Keep storage bounded, but never evict a best run that another table points to.
   if (REC.challenges.length > 40) REC.challenges.length = 40;
-  [...REC.L.map((T, lv) => [T, lv, CTRL.tap]), ...REC.R.map((T, lv) => [T, lv, CTRL.ride])].forEach(([T, lv, ctrl]) => {
+  [...REC.L.map((T, lv) => [T, lv, CTRL.tap]), ...REC.R.map((T, lv) => [T, lv, CTRL.ride]), ...REC.S.map((T, lv) => [T, lv, CTRL.slalom])].forEach(([T, lv, ctrl]) => {
     const keep = new Set([
       ...Object.keys(T.rivers).map(n => seedHex(riverSeed(n))),
       ...Object.keys(T.daily).sort().slice(-14).map(k => seedHex(dailySeed(k))),
@@ -3016,7 +3355,9 @@ function unlockAudio() {
   A.startMusic();
   A.setMusicState(G.state === 'play' ? 'play' : 'menu');
 }
-function applyVolumes() { A.setVolumes({ master: 1, sfx: S.sfx, music: S.music, ambience: S.amb }); }
+function applyVolumes() { A.setVolumes({ master: 1, sfx: S.sfx, music: S.music, ambience: S.amb }); A.setMuted(!!S.muted); }
+function syncMuteIcons() { document.querySelectorAll('.mutebtn').forEach(b => { b.classList.toggle('muted', !!S.muted); b.setAttribute('aria-label', S.muted ? 'Zapnout zvuk (M)' : 'Ztlumit (M)'); b.setAttribute('aria-pressed', S.muted ? 'true' : 'false'); }); }
+function toggleMute() { S.muted = !S.muted; saveSettings(); applyVolumes(); syncMuteIcons(); A.ui('toggle'); }
 
 // ─── Biomes (land art direction) ───────────────────────────────────────────
 const BIOMES = [
@@ -3094,7 +3435,9 @@ cvW.style.visibility = 'hidden';
 const lightCv = document.createElement('canvas'), lctx = lightCv.getContext('2d');
 const vigCv = document.createElement('canvas');
 const V = { w: 1, h: 1, dpr: 1, s: 1, visW: 1, visH: 1, boatOff: 140, camX: 0, camY: 0, q: 2, sx: 0, sy: 0 };
-let qualityLevel = S.quality === 'low' ? 0 : S.quality === 'medium' ? 1 : S.quality === 'high' ? 2 : softwareGL ? 0 : 2;   // no GPU: start at the cheapest level
+// weak devices (≤ 4 cores or ≤ 3 GB) start at the middle level instead of discovering it after seconds of jank
+const weakDevice = (navigator.hardwareConcurrency || 8) <= 4 || (navigator.deviceMemory || 8) <= 3;
+let qualityLevel = S.quality === 'low' ? 0 : S.quality === 'medium' ? 1 : S.quality === 'high' ? 2 : softwareGL ? 0 : weakDevice ? 1 : 2;   // no GPU: start at the cheapest level
 
 // Max render height per setting; 'auto' follows the quality governor (720p → 600p → 480p when slow).
 const RES_STEPS = ['auto', '480', '540', '720', '900', '1080'];
@@ -3117,6 +3460,7 @@ function layout(force) {
   const st = stageEl.style;
   st.width = w + 'px'; st.height = h + 'px'; st.left = Math.floor((W - w) / 2) + 'px'; st.top = Math.floor((H - h) / 2) + 'px';
   document.body.classList.toggle('windowed', w < W || h < H);
+  document.body.classList.toggle('lowfx', qualityLevel === 0 || softwareGL);   // no live backdrop blur on weak setups
   const rs = document.documentElement.style;
   rs.setProperty('--vw', w / 100 + 'px'); rs.setProperty('--vh', h / 100 + 'px');
   const maxDpr = qualityLevel === 2 ? 2 : qualityLevel === 1 ? 1.5 : 1;
@@ -3130,9 +3474,10 @@ function layout(force) {
   layoutKey = key; layoutAt = performance.now();
   const ri = $('resInfo'); if (ri) ri.textContent = `teď ${Math.round(w * dpr)}×${Math.round(h * dpr)}`;
   V.w = w; V.h = h; V.dpr = dpr;
-  V.s = Math.min(h / 700, w / 740);
+  const rideView = G.ctrl >= CTRL.ride, revAll = REVEAL + (rideView ? REVEAL_RIDE_EXTRA : 0);
+  V.s = Math.min(h / 700, w / (140 + revAll));
   V.visW = w / V.s; V.visH = h / V.s;
-  V.boatOff = clamp(V.visW - REVEAL, 140, Math.max(140, V.visW * 0.42));
+  V.boatOff = clamp(V.visW - revAll, 140, Math.max(140, V.visW * 0.42));
   V.camY = RIVER_H / 2 - V.visH / 2;
   cv.width = Math.round(w * V.dpr); cv.height = Math.round(h * V.dpr);
   cv.style.width = w + 'px'; cv.style.height = h + 'px';
@@ -3747,7 +4092,8 @@ const hullGrads = new Map();
 let strengthShow = 0;
 function drawStrengthBar(c, bs, sim) {
   const e = clamp(sim.E / 100, 0, 1), flashA = clamp(1 - (VT - (G.barFlash || -9)) / 0.35, 0, 1);
-  const busy = e < 0.985 || sim.tired || flashA > 0;
+  const bsp = sim.K && sim.boost ? clamp(sim.boost / sim.K.bCap, 0, 1.25) : 0;   // speed: share of the boost cap
+  const busy = e < 0.985 || sim.tired || flashA > 0 || bsp > 0.03;
   strengthShow = busy ? Math.min(1, strengthShow + 0.12) : Math.max(0, strengthShow - 0.02);
   if (strengthShow <= 0.01) return;
   // at least ~44×6 CSS px so it stays readable on a phone
@@ -3767,6 +4113,15 @@ function drawStrengthBar(c, bs, sim) {
   }
   c.globalAlpha = strengthShow * 0.8; c.fillStyle = 'rgba(255,255,255,0.7)'; c.fillRect(x + w * 0.25 - 0.4, y - 1, 0.8, hgt + 2);   // where power starts to fade
   if (flashA > 0) { c.globalAlpha = flashA * 0.7; c.fillStyle = '#fff'; roundRect(c, x, y, w, hgt, 2.5); c.fill(); }
+  if (bsp > 0.03) {   // speed bar: amber from 70 % ("rychle"), pulsing gold from 93 % ("turbo")
+    const by = y + hgt + 4, bh = Math.max(3, hgt * 0.6), turbo = bsp >= sim.K.bTurbo, fast = bsp >= sim.K.bFast;
+    c.globalAlpha = strengthShow * 0.85; c.fillStyle = 'rgba(0,20,30,0.6)'; roundRect(c, x - 1.5, by - 1.5, w + 3, bh + 3, 3); c.fill();
+    c.globalAlpha = strengthShow * (turbo && !reducedMotion ? 0.75 + 0.25 * Math.sin(VT * 22) : 1);
+    c.fillStyle = turbo ? '#ffe27a' : fast ? '#ffb347' : '#8fe3ff';
+    roundRect(c, x, by, w * Math.min(1, bsp), bh, 2); c.fill();
+    c.globalAlpha = strengthShow * 0.7; c.fillStyle = 'rgba(255,255,255,0.7)';
+    c.fillRect(x + w * sim.K.bFast - 0.4, by - 1, 0.8, bh + 2); c.fillRect(x + w * sim.K.bTurbo - 0.4, by - 1, 0.8, bh + 2);
+  }
   c.restore();
 }
 // up to three chevrons on the travel side: direction + tempo at a glance
@@ -3783,13 +4138,15 @@ function drawTempoChevrons(c, bs, sim) {
   c.restore();
 }
 // "kam doklouže": where the hull will be at the next gate (max 0.8 s) if released now
-const rideCoastOn = () => S.coast === 'on' || (S.coast !== 'off' && G.level !== 2);
+const rideCoastOn = () => G.state !== 'ready' && (S.coast === 'on' || (S.coast !== 'off' && (G.level !== 2 || !(REC.stats.rideRuns > 2))));
 function drawCoastRing(c, bs, sim, course) {
   const K = sim.K; if (!K) return;
   const g = course.gates[sim.nextGate];
   const T = Math.min(0.8, g ? Math.max(0.05, (g.x - bs.x) / Math.max(1, sim.vx)) : 0.8);
   const w = course.flowAt(bs.x) * K.drift;
-  const py = bs.y + w * T + (bs.vy - w) * (1 - Math.exp(-K.drag * T)) / K.drag, px = bs.x + sim.vx * T;
+  let pend = 0;   // the rest of the stroke surge that is still being delivered
+  if (sim.dk < 8) { let q = 0; for (let i = sim.dk; i < 8; i++) q += DRIVE[i]; pend = sim.dJ * q / DRIVE_SUM; }
+  const py = bs.y + w * T + (bs.vy + pend - w) * (1 - Math.exp(-K.drag * T)) / K.drag, px = bs.x + sim.vx * T;
   c.save(); c.globalAlpha = 0.35; c.strokeStyle = '#ffffff'; c.lineWidth = 2;
   c.beginPath(); c.arc(px, py, 9, 0, TAU); c.stroke();
   c.globalAlpha = 0.2; c.beginPath(); c.moveTo(bs.x + 30, bs.y); c.lineTo(px - 9, py); c.stroke();
@@ -3939,9 +4296,9 @@ function prewarmSprites(course, revealX) {
   for (let gi = course.gateIndexAt(revealX - 300); gi < course.gates.length; gi++) {
     const g = course.gates[gi];
     if (g.x - g.halfW > revealX + 700) break;
-    if (g.kind === 'rocks') { for (const s2 of g.shapes) if (!rockSprite(s2.r / 0.92, s2.v, g.biome, true)) return; }
-    else if (g.kind === 'logs' || g.kind === 'boom') {
-      for (const s2 of g.shapes) if (!logSprite(s2, Math.hypot(s2.x2 - s2.x1, s2.y2 - s2.y1), s2.r / 0.92, g.biome, g.kind === 'boom', true)) return;
+    if (g.kind === 'rocks' || g.kind === 'garden') { for (const s2 of g.shapes) if (!rockSprite(s2.r / 0.92, s2.v, g.biome, true)) return; }
+    else if (g.kind === 'logs' || g.kind === 'boom' || g.kind === 'channel') {
+      for (const s2 of g.shapes) if (!logSprite(s2, Math.hypot(s2.x2 - s2.x1, s2.y2 - s2.y1), s2.r / 0.92, g.biome, g.kind === 'boom' || g.kind === 'channel', true)) return;
     }
   }
 }
@@ -4097,7 +4454,8 @@ function render(now, dt) {
   V.sx = sh ? (Math.sin(VT * 61) + Math.sin(VT * 37.3)) * 0.5 * sh : 0;
   V.sy = sh ? (Math.sin(VT * 53.7) + Math.cos(VT * 41.1)) * 0.5 * sh : 0;
   V.camX = camBoatX - V.boatOff;
-  const revealX = camBoatX + REVEAL;     // nothing past this line is ever drawn — same on every screen
+  const revealExt = G.ctrl >= CTRL.ride && sim && sim.boost ? Math.min(REVEAL_RIDE_EXTRA, REVEAL * sim.boost) : 0;
+  const revealX = camBoatX + REVEAL + revealExt;     // nothing past this line is ever drawn — same on every screen
   course.ensure(V.camX + V.visW + 800);
   const tick = visualTick(sim, alpha);
   const s = V.s;
@@ -4107,8 +4465,8 @@ function render(now, dt) {
   const Ba = BIOMES[bm.a], Bb = BIOMES[bm.b];
   const lerpB = k => Ba[k] + (Bb[k] - Ba[k]) * bm.t;
   const night = lerpB('night');
-  const flow = course.speedAt(V.camX) * 0.6;
-  if (G.state !== 'paused') G.flowAcc += flow * dt;
+  const flow = (G.ctrl >= CTRL.ride && sim && sim.boost ? sim.vx : course.speedAt(V.camX)) * 0.6;
+  if (G.state !== 'paused') { G.flowAcc += flow * dt; G.flowY = (G.flowY || 0) + course.flowAt(bs.x) * 48 * dt; }
   const hasWater = !!(water && !water.lost);
 
   // trail bookkeeping (world points at the stern)
@@ -4139,10 +4497,11 @@ function render(now, dt) {
     };
     const pushGate = g => {
       const off = moveOffset(g.move, tick);
-      const kind = g.kind === 'bridge' ? 3 : g.kind === 'rocks' ? (BIOMES[g.biome].rock.ice ? 2 : 0) : 1;
+      const kind = g.kind === 'bridge' ? 3 : (g.kind === 'rocks' || g.kind === 'garden') ? (BIOMES[g.biome].rock.ice ? 2 : 0) : 1;
+      const step = g.kind === 'channel' ? 3.4 : 2.4;   // long straight walls need fewer foam circles
       for (const sh2 of g.shapes) {
         if (sh2.t === 0) { pushO(sh2.x, sh2.y + off, sh2.r, kind); continue; }
-        const L = Math.hypot(sh2.x2 - sh2.x1, sh2.y2 - sh2.y1), n = Math.max(1, Math.ceil(L / (sh2.r * 2.4)));
+        const L = Math.hypot(sh2.x2 - sh2.x1, sh2.y2 - sh2.y1), n = Math.max(1, Math.ceil(L / (sh2.r * step)));
         // water end first, so the visible part of a log always gets its foam
         const tipFirst = Math.abs(sh2.y2 - RIVER_H / 2) < Math.abs(sh2.y1 - RIVER_H / 2);
         for (let k = 0; k <= n; k++) { const t = tipFirst ? 1 - k / n : k / n; pushO(sh2.x1 + (sh2.x2 - sh2.x1) * t, sh2.y1 + (sh2.y2 - sh2.y1) * t + off, sh2.r, kind); }
@@ -4195,8 +4554,8 @@ function render(now, dt) {
 
   // 2D wake lines (subtle accent over the shader wake; the whole wake without WebGL)
   const wakeK = water ? 0.35 : 1;
-  const rideW = G.ctrl === CTRL.ride && G.state !== 'menu' && sim && sim.E !== undefined;
-  drawWake(c, trail, flow, rideW ? (sim.flowOn ? '255,220,140' : sim.mult === 2 ? '170,255,240' : '255,255,255') : '255,255,255', wakeK, rideW ? 1 + Math.min(1, Math.abs(sim.vy) / 450) : 1);
+  const rideW = G.ctrl >= CTRL.ride && G.state !== 'menu' && sim && sim.E !== undefined;
+  drawWake(c, trail, flow, rideW ? (sim.flowOn ? '255,220,140' : sim.mult === 2 ? '170,255,240' : '255,255,255') : '255,255,255', wakeK, rideW ? (1 + Math.min(1, Math.abs(sim.vy) / 450)) * (1 + 1.5 * (sim.boost || 0)) : 1);
   if (rideW && sim.flowOn && sim.alive && VT - (G.sparkAt || 0) > 0.2) { G.sparkAt = VT; const [hx, hy] = sim.heading(); spawn({ k: 'spark', x: sim.x + hx * 28, y: sim.y + hy * 28, vx: 60 + Math.random() * 60, vy: (Math.random() - 0.5) * 80, s: 1.4, life: 0.4 }); }
   if (S.ghosts) for (const gh of G.ghosts) { const tr = ghostTrails.get(gh); if (tr) drawWake(c, tr, flow, '190,240,255', wakeK * 0.5); }
 
@@ -4213,27 +4572,33 @@ function render(now, dt) {
   c.beginPath(); c.rect(V.camX - 400, V.camY - 400, revealX - V.camX + 400, V.visH + 800); c.clip();
   drawFlipMarkers(c, course, revealX);
   const decks = [];
-  for (let gi = course.gateIndexAt(V.camX - 160); gi < course.gates.length; gi++) {
+  // a průplav that began behind the camera can still cover the screen: step back a few gates
+  for (let gi = Math.max(0, course.gateIndexAt(V.camX - 160) - 3); gi < course.gates.length; gi++) {
     const g = course.gates[gi];
     if (g.x - g.halfW > revealX || g.x - g.halfW > V.camX + V.visW + 40) break;
+    if (g.x + g.halfW < V.camX - 160) continue;
     const a = revealAlpha(g.x, revealX);
     if (a <= 0) continue;
     const B = BIOMES[g.biome];
     const off = moveOffset(g.move, tick);
     c.globalAlpha = a;
-    if (g.kind === 'rocks') {
+    if (g.kind === 'green' || g.kind === 'red') {
+      drawSlalomGate(c, g, gi, sim);
+      for (const rk of g.rocks) { const vr = rk.r / 0.92, sp = rockSprite(vr, rk.id * 7, g.biome), hh = sp.half * vr / sp.vq; c.drawImage(sp.c, rk.x - hh, rk.y - hh, hh * 2, hh * 2); }
+    } else if (g.kind === 'rocks' || g.kind === 'garden') {
       for (const s2 of g.shapes) {
         const vr = s2.r / 0.92, sp = rockSprite(vr, s2.v, g.biome), h = sp.half * vr / sp.vq;
         c.drawImage(sp.c, s2.x - h, s2.y + off - h, h * 2, h * 2);
       }
-    } else if (g.kind === 'logs' || g.kind === 'boom') {
-      for (const s2 of g.shapes) drawLog(c, s2, off, g.biome, g.kind === 'boom');
+    } else if (g.kind === 'logs' || g.kind === 'boom' || g.kind === 'channel') {
+      for (const s2 of g.shapes) drawLog(c, s2, off, g.biome, g.kind === 'boom' || g.kind === 'channel');   // walls = lashed floating logs
     } else if (g.kind === 'bridge') {
       for (const s2 of g.shapes) drawPillar(c, s2, B);
       decks.push(g);
     }
     c.globalAlpha = 1;
   }
+  if (course.finite && course.finishX < revealX + 40 && course.finishX > V.camX - 80) drawFinishLine(c, course);
   prewarmSprites(course, revealX);
   const taken = sim ? sim.taken : [];
   const visStars = [];
@@ -4271,7 +4636,7 @@ function render(now, dt) {
     }
   } else if (sim) {
     const st = G.state === 'menu' ? G.attract.pad : G.pad;
-    const ride = G.ctrl === CTRL.ride && G.state !== 'menu' && sim.E !== undefined;
+    const ride = G.ctrl >= CTRL.ride && G.state !== 'menu' && sim.E !== undefined;
     if (ride) {   // cosmetic yaw spring kicked by each stroke (the hitbox keeps the sim heading)
       const ddt = Math.min(dt, 0.05);
       G.yawV += (-120 * G.yaw - 14 * G.yawV) * ddt; G.yaw = clamp(G.yaw + G.yawV * ddt, -0.06, 0.06);
@@ -4299,7 +4664,7 @@ function render(now, dt) {
   // birds gliding high above (day only) + drifting cloud shadows
   const day = 1 - night - lerpB('dim');
   if (day > 0.4 && qualityLevel > 0) drawBirds(c, day);
-  if (day > 0.3 && qualityLevel > 0) {
+  if (day > 0.3 && qualityLevel > 1) {
     const cs = glowSprite('rgba(0,18,30,0.9)', 'cloud');
     c.globalAlpha = 0.13 * day;
     const SP = 1500; // world-anchored, slowly drifting downstream
@@ -4380,12 +4745,16 @@ function render(now, dt) {
   }
   // colour grade (soft-light on real pixels)
   const gradeC = mixHex(Ba.grade, Bb.grade, bm.t), gradeA = lerpB('gradeA');
-  c.globalCompositeOperation = 'soft-light';
-  c.fillStyle = rgba(gradeC, gradeA * 0.8);
-  c.fillRect(0, 0, V.w, V.h);
-  c.globalCompositeOperation = 'source-over';
+  if (qualityLevel < 2 || softwareGL) {   // a plain tint costs a fraction of a full-screen soft-light pass (same look within a few levels)
+    c.fillStyle = rgba(gradeC, gradeA * 0.19); c.fillRect(0, 0, V.w, V.h);
+  } else {
+    c.globalCompositeOperation = 'soft-light';
+    c.fillStyle = rgba(gradeC, gradeA * 0.8);
+    c.fillRect(0, 0, V.w, V.h);
+    c.globalCompositeOperation = 'source-over';
+  }
   const rays = lerpB('rays');
-  if (rays > 0.02 && qualityLevel > 0) drawRays(c, rays);
+  if (rays > 0.02 && qualityLevel > 1) drawRays(c, rays);
   // the current-direction hint sits above lighting and grade so it never washes out
   if (sim && sim.alive && (G.state === 'play' || G.state === 'ready' || G.state === 'paused')) {
     c.setTransform(k, 0, 0, k, (-V.camX * s + V.sx) * V.dpr, (-V.camY * s + V.sy) * V.dpr);
@@ -4509,19 +4878,50 @@ function drawParticle(c, p) {
 function drawCurrentHint(c, bs, course) {
   const cur = course.currentAt(bs.x), fl = Math.abs(course.flowAt(bs.x));
   const t = (VT * 1.6) % 1;
-  const since = VT - (G.flipAt || -99), k = since < 2.5 ? 1.6 - 0.24 * since : 1;   // louder right after a flip
+  const u = clamp(0.95 / V.s, 1, 2.2);   // keep the arrows readable when the world is scaled down (phones)
+  const since = VT - (G.flipAt || -99), k = (since < 2.5 ? 1.6 - 0.24 * since : 1) * u;   // louder right after a flip
   c.save();
   c.lineCap = 'round'; c.lineJoin = 'round';
   for (let i = 0; i < 2; i++) {
-    const ph = (t + i * 0.5) % 1, d = 36 + ph * 22, y = bs.y + cur * d, w = 9 * k, h = 5.5 * k;
+    const ph = (t + i * 0.5) % 1, d = (36 + ph * 22) * u, y = bs.y + cur * d, w = 9 * k, h = 5.5 * k;
     c.globalAlpha = (1 - ph) * 0.9 * (0.3 + 0.7 * fl);
     c.beginPath(); c.moveTo(bs.x - w, y - cur * h); c.lineTo(bs.x, y); c.lineTo(bs.x + w, y - cur * h);
-    c.strokeStyle = 'rgba(0,20,30,0.55)'; c.lineWidth = 4.6; c.stroke();
-    c.strokeStyle = cur > 0 ? '#bfefff' : '#ffb35c'; c.lineWidth = 2.4; c.stroke();
+    c.strokeStyle = 'rgba(0,20,30,0.55)'; c.lineWidth = 4.6 * u; c.stroke();
+    c.strokeStyle = cur > 0 ? '#bfefff' : '#ffb35c'; c.lineWidth = 2.4 * u; c.stroke();
   }
   c.restore();
 }
 
+// two striped poles per gate; the next gate pulses, passed gates show how they went
+function drawSlalomGate(c, g, idx, sim) {
+  const red = g.kind === 'red', base = red ? '#e0453a' : '#27b866', cur = sim && idx === sim.cross, res = G.slRes[idx], done = sim && idx < sim.cross;
+  const pulse = cur ? 0.5 + 0.5 * Math.sin(VT * 6) : 0;
+  const top = g.cy - g.half, bot = g.cy + g.half;
+  c.save();
+  // the gate line: the boat's centre must cross it between the poles
+  c.setLineDash([9, 9]); c.lineWidth = cur ? 2.4 : 1.6;
+  c.strokeStyle = done ? (res === 'miss' ? 'rgba(255,90,70,0.8)' : res === 'touch' ? 'rgba(255,200,90,0.7)' : 'rgba(120,255,170,0.65)') : cur ? `rgba(255,255,255,${0.55 + 0.35 * pulse})` : 'rgba(255,255,255,0.28)';
+  c.beginPath(); c.moveTo(g.x, top + 8); c.lineTo(g.x, bot - 8); c.stroke(); c.setLineDash([]);
+  if (cur) { c.globalAlpha = 0.25 + 0.2 * pulse; c.fillStyle = red ? '#ff8a80' : '#9dffc4'; c.beginPath(); c.ellipse(g.x, g.cy, 16, g.half - 6, 0, 0, TAU); c.fill(); c.globalAlpha = 1; }
+  for (const py of [top, bot]) {
+    c.fillStyle = 'rgba(0,25,35,0.28)'; c.beginPath(); c.ellipse(g.x + 4, py + 5, 9, 7, 0, 0, TAU); c.fill();
+    c.fillStyle = '#fff'; c.beginPath(); c.arc(g.x, py, 9, 0, TAU); c.fill();
+    c.fillStyle = done && res === 'miss' ? '#8a8f94' : base; c.beginPath(); c.arc(g.x, py, 6.4, 0, TAU); c.fill();
+    c.fillStyle = '#fff'; c.beginPath(); c.arc(g.x, py, 3.1, 0, TAU); c.fill();
+  }
+  // number plate above the upper pole
+  const label = String(g.n + 1), w = 8 + label.length * 7;
+  c.fillStyle = cur ? '#ffffff' : 'rgba(10,30,40,0.7)'; roundRect(c, g.x - w / 2, top - 30, w, 15, 4); c.fill();
+  c.fillStyle = cur ? '#0b2530' : '#e6f8ff'; c.font = '700 11px system-ui, sans-serif'; c.textAlign = 'center'; c.textBaseline = 'middle'; c.fillText(label, g.x, top - 22.5);
+  c.restore();
+}
+function drawFinishLine(c, course) {
+  const fx = course.finishX, y0 = -10, y1 = RIVER_H + 10, sq = 16;
+  c.save();
+  for (let y = y0, i = 0; y < y1; y += sq, i++) for (let k = 0; k < 2; k++) { c.fillStyle = (i + k) % 2 ? '#10202a' : '#fff'; c.fillRect(fx - sq + k * sq, y, sq, sq); }
+  c.fillStyle = 'rgba(255,255,255,0.9)'; c.font = '800 22px system-ui, sans-serif'; c.textAlign = 'center'; c.fillText('CÍL', fx, RIVER_H / 2 - 40);
+  c.restore();
+}
 function drawFlipMarkers(c, course, revealX) {
   for (const fx of course.flips) {
     const fw = course.lv.flipW || 0;
@@ -4628,24 +5028,28 @@ function drawHitboxes(c, course, sim, tick, revealX) {
 }
 
 // 2D fallback water when WebGL2 is unavailable
-let fbWaterTile = null;
+let fbWaterTile = null, fbPat = null, fbM = null, fbGrad = null, fbGradKey = '';
 function drawWaterFallback(c, course, bm, flow) {
   const pa = WPAL[bm.a], pb = WPAL[bm.b];
   const col = (k, f) => { const a = pa[k], b = pb[k]; return `rgb(${[0, 1, 2].map(i => Math.round((a[i] + (b[i] - a[i]) * bm.t) * 255 * f)).join(',')})`; };
-  const g = c.createLinearGradient(0, 0, 0, RIVER_H);
-  g.addColorStop(0, col('shallow', 1)); g.addColorStop(0.18, col('deep', 1.05)); g.addColorStop(0.5, col('deep', 0.9)); g.addColorStop(0.82, col('deep', 1.05)); g.addColorStop(1, col('shallow', 1));
-  c.fillStyle = g; c.fillRect(V.camX - 10, V.camY - 10, V.visW + 20, V.visH + 20);
+  const gk = bm.a + '|' + bm.b + '|' + Math.round(bm.t * 32);
+  if (fbGradKey !== gk) {   // rebuilt only while the biome blends
+    fbGradKey = gk; fbGrad = c.createLinearGradient(0, 0, 0, RIVER_H);
+    fbGrad.addColorStop(0, col('shallow', 1)); fbGrad.addColorStop(0.18, col('deep', 1.05)); fbGrad.addColorStop(0.5, col('deep', 0.9)); fbGrad.addColorStop(0.82, col('deep', 1.05)); fbGrad.addColorStop(1, col('shallow', 1));
+  }
+  const pad = 8 + 20 / V.s;   // also covers the camera shake on small scales
+  c.fillStyle = fbGrad; c.fillRect(V.camX - pad, V.camY - pad, V.visW + 2 * pad, V.visH + 2 * pad);
   if (!fbWaterTile) {
     fbWaterTile = document.createElement('canvas'); fbWaterTile.width = 256; fbWaterTile.height = 256;
     const x = fbWaterTile.getContext('2d');
     x.strokeStyle = 'rgba(255,255,255,0.10)'; x.lineCap = 'round';
     for (let i = 0; i < 140; i++) { const px = Math.random() * 256, py = Math.random() * 256, l = 10 + Math.random() * 40; x.lineWidth = 0.6 + Math.random() * 1.6; x.beginPath(); x.moveTo(px, py); x.quadraticCurveTo(px + l / 2, py + (Math.random() - 0.5) * 6, px + l, py); x.stroke(); }
   }
-  const pat = c.createPattern(fbWaterTile, 'repeat');
-  const off = (V.camX - G.flowAcc) % 256;
-  c.save(); c.translate(V.camX - off - 256, V.camY - 256);
-  c.fillStyle = pat; c.fillRect(0, 0, V.visW + 768, V.visH + 512);
-  c.restore();
+  if (!fbPat) { fbPat = c.createPattern(fbWaterTile, 'repeat'); fbM = new DOMMatrix(); }
+  // the texture drifts along the river and sideways with the cross-current at the boat (stops in slack water)
+  fbM.e = (((V.camX - G.flowAcc) % 256) + 256) % 256; fbM.f = (((V.camY + (G.flowY || 0)) % 256) + 256) % 256;
+  fbPat.setTransform(fbM);
+  c.fillStyle = fbPat; c.fillRect(V.camX - pad, V.camY - pad, V.visW + 2 * pad, V.visH + 2 * pad);
   // foam rings around rocks
   c.strokeStyle = 'rgba(255,255,255,0.35)'; c.lineWidth = 3;
   for (const r of ripples) { const age = (VT - r.t) / r.dur; if (age < 1) { c.globalAlpha = 1 - age; c.beginPath(); c.arc(r.x + flow * (VT - r.t), r.y, 8 + age * 60 * r.str, 0, TAU); c.stroke(); } }
@@ -4705,7 +5109,7 @@ function handleEvent(ev, sim, quiet) {
       const side = ev.side || (holder.pad && holder.pad.side ? -holder.pad.side : 1);
       const pw = ev.power === undefined ? 1 : clamp(ev.power, 0.15, 1.4);
       holder.pad = { side, t: VT, pw, dur: ev.iv ? clamp(ev.iv / 120, 0.11, 0.3) : 0.3 };
-      if (isPlayer && G.ctrl === CTRL.ride) { G.yawV += (ev.d || 0) * 0.9 * pw; if (ev.brake) rideHint(4, 'Opačný záběr = brzda'); }
+      if (isPlayer && G.ctrl >= CTRL.ride) { G.yawV += (ev.d || 0) * 0.9 * pw; if (ev.brake) rideHint(4, 'Opačný záběr = brzda'); }
       const [bx, by] = bladePos(sim, side);
       addRipple(bx, by, 0.6 * pw, 0.9);
       const nd = Math.round(3 + 4 * pw);
@@ -4719,6 +5123,7 @@ function handleEvent(ev, sim, quiet) {
       break;
     }
     case 'gate':
+      if (isPlayer && G.ctrl === CTRL.slalom) { slalomGate(ev, sim); break; }
       if (isPlayer) {
         G.streak++;
         A.gate(G.streak);
@@ -4727,7 +5132,9 @@ function handleEvent(ev, sim, quiet) {
         bumpScore();
         const ride = G.ctrl === CTRL.ride;
         if (ev.near) { spawn({ k: 'text', text: ride ? 'Těsně! +⚡' : 'Těsně!', x: sim.x + 10, y: sim.y - 30, life: 0.9, col: '#ffe08a', size: 14 }); A.nearMiss(); G.barFlash = VT; }
-        if (ride && ev.pts > 1) spawn({ k: 'text', text: '+' + ev.pts, x: sim.x + 24, y: sim.y - 14, life: 0.7, col: sim.flowOn ? '#ffe9a8' : '#ffd34d', size: 15 });
+        if (ride && ev.pts > 1) spawn({ k: 'text', text: '+' + ev.pts + (ev.bonus ? ' ⚡' : ''), x: sim.x + 24, y: sim.y - 14, life: 0.7, col: ev.bonus > 1 ? '#fff0a0' : sim.flowOn ? '#ffe9a8' : '#ffd34d', size: 15 });
+        if (ride && ev.bonus) rideHint2(2, 'Rychle projeté brány = bonus body');
+        if (ride && ev.kind === 'channel') rideHint2(4, 'Průplav — drž čáru hvězd');
         if (ride && sim.gatesPassed === 1) rideHint(128, '5 branek bez vyčerpání = ×2');
         if (G.sim.score > G.bestBefore && G.bestBefore > 0 && !G.recordFlag) { G.recordFlag = true; showBanner('Nový rekord!', 'Pokračuj, každý bod se počítá', 1600); }
         // milestones: by score in classic, by gates in free ride (its score runs ×3)
@@ -4745,6 +5152,25 @@ function handleEvent(ev, sim, quiet) {
       }
       break;
     }
+    case 'pole':
+      if (isPlayer) {
+        if (G.slRes[ev.gate] !== 'miss') G.slRes[ev.gate] = 'touch';
+        spawn({ k: 'text', text: 'Dotek! +' + (sim.S.pen.touch / TICK_RATE) + ' s', x: sim.x + 10, y: sim.y - 30, life: 0.9, col: '#ff9f8a', size: 14 });
+        A.nearMiss(); Native.haptic('flip'); trauma = Math.min(1, trauma + 0.12);
+      }
+      break;
+    case 'pen':
+      if (isPlayer) {
+        const sec = ev.ticks / TICK_RATE, el = $('hudSlPen');
+        el.textContent = '+' + (sim.pen / TICK_RATE).toFixed(0).replace('.', ',') + ' s'; el.classList.remove('pop'); void el.offsetWidth; el.classList.add('pop');
+        if (ev.kind === 'miss') { showBanner('Vynechaná branka!', '+' + sec + ' s', 1200, 1); A.crash(); flash = S.shake && !reducedMotion ? 0.3 : 0.1; flashColor = '255,80,60'; }
+        else if (ev.kind === 'rock') { spawn({ k: 'text', text: 'Kámen! +' + sec + ' s', x: ev.x, y: ev.y - 20, life: 0.9, col: '#ffb27a', size: 14 }); A.nearMiss(); }
+        else if (ev.kind === 'bank') { spawn({ k: 'text', text: 'Břeh! +' + sec + ' s', x: ev.x, y: ev.y - 20, life: 0.9, col: '#ffb27a', size: 14 }); }
+      }
+      break;
+    case 'finish':
+      if (isPlayer) onSlalomFinish(sim);
+      break;
     case 'tired':
       if (isPlayer) {
         showBanner('Došly síly!', 'Pusť pádlo a nech loď klouzat — síla se vrátí', 1500, 1); A.nearMiss(); Native.haptic('flip'); flash = 0.12; flashColor = '255,90,70';
@@ -4755,19 +5181,19 @@ function handleEvent(ev, sim, quiet) {
       if (isPlayer) { spawn({ k: 'text', text: 'Síla zpět', x: sim.x, y: sim.y - 34, life: 0.9, col: '#bff3ff', size: 13 }); G.barFlash = VT; }
       break;
     case 'mult':
-      if (isPlayer && ev.up) {
+      if (isPlayer && ev.up && G.ctrl === CTRL.ride) {
         const el = $('hudMult'); el.classList.remove('pop'); void el.offsetWidth; el.classList.add('pop');
         A.gate(8 + ev.mult * 4); Native.haptic('stroke');
         if (ev.mult === 2) { spawn({ k: 'text', text: '×2 Plynulá jízda!', x: sim.x, y: sim.y - 40, life: 1.1, col: '#ffd34d', size: 15 }); rideHint(32, 'Série ×2! Když ti dojde síla, spadne na ×1'); }
       }
       break;
     case 'flow':
-      if (isPlayer && ev.on) { showBanner('FLOW ×3', 'Pádlování za půl síly', 1300, 1); A.record(); Native.haptic('record'); }
+      if (isPlayer && ev.on && G.ctrl === CTRL.ride) { showBanner('FLOW ×3', 'Pádlování za půl síly', 1300, 1); A.record(); Native.haptic('record'); }
       break;
     case 'flip':
       if (isPlayer) {
         A.flip(); Native.haptic('flip'); trauma = Math.min(1, trauma + 0.35); G.flipAt = VT;
-        if (G.ctrl === CTRL.ride) showBanner(ev.cur < 0 ? 'Protiproud!' : 'Proud se vrací', ev.cur < 0 ? 'Proud teď nese loď NAHORU — dolů musíš pádlovat' : 'Proud zase nese loď DOLŮ', 1700, 2);
+        if (G.ctrl >= CTRL.ride) showBanner(ev.cur < 0 ? 'Protiproud!' : 'Proud se vrací', ev.cur < 0 ? 'Proud teď nese loď NAHORU — dolů musíš pádlovat' : 'Proud zase nese loď DOLŮ', 1700, 2);
         else showBanner(ev.cur < 0 ? 'Protiproud!' : 'Proud se vrací', ev.cur < 0 ? 'Proud teď táhne NAHORU — záběr tě pošle dolů' : 'Proud opět táhne dolů', 1700, 2);
       }
       break;
@@ -4795,11 +5221,19 @@ function bumpScore() {
 // ─── Czech text helpers ────────────────────────────────────────────────────
 const pl = (n, one, few, many) => (n === 1 ? one : n >= 2 && n <= 4 ? few : many);
 const bodu = n => `${n} ${pl(n, 'bod', 'body', 'bodů')}`;
+// ── Slalom na čas helpers: the replay "score" is SL_CAP − time (in ticks) ──
+const fmtTime = ticks => { const cs = Math.floor(ticks * 5 / 6), m = Math.floor(cs / 6000), s = Math.floor((cs % 6000) / 100), c = cs % 100; return `${m}:${String(s).padStart(2, '0')},${String(c).padStart(2, '0')}`; };
+const slTime = score => fmtTime(SL_CAP - score);
+const SL_MEDALS = [[42, 55, 80], [41, 65, 125], [37, 65, 135]];   // gold / silver / bronze limits in seconds per level
+const slMedal = (level, ticks) => { const m = SL_MEDALS[levelOf(level).id], s = ticks / TICK_RATE; return s <= m[0] ? '🥇' : s <= m[1] ? '🥈' : s <= m[2] ? '🥉' : ''; };
+const trackSeed = n => strHash('PEREJE/slalom/track/' + n);
+// score text for any control scheme (challenge preview, share message, comparisons)
+const scoreText = (score, ctrl) => ctrl === CTRL.slalom ? slTime(score) : bodu(score);
 const secs = t => t.toFixed(1).replace('.', ',') + ' s';
 
 // ─── Run lifecycle ─────────────────────────────────────────────────────────
-function modeLabel(mode, extra) {
-  if (mode === 'daily') { const [y, m, d] = extra.split('-'); return `Denní výzva ${+d}. ${+m}. ${y}`; }
+function modeLabel(mode, extra, ctrl) {
+  if (mode === 'daily') { const [y, m, d] = extra.split('-'); return `${ctrl === CTRL.slalom ? 'Denní slalom' : 'Denní výzva'} ${+d}. ${+m}. ${y}`; }
   if (mode === 'river') return 'Řeka ' + extra;
   return 'Volná plavba';
 }
@@ -4809,9 +5243,12 @@ function prepareRun(opt) {
   G.mode = opt.mode; G.seed = opt.seed >>> 0; G.label = opt.label; G.challenge = opt.challenge || null;
   G.mp = opt.mode === 'mp';
   G.level = levelOf(G.challenge ? G.challenge.level : opt.level ?? S.level).id;
-  G.ctrl = (G.challenge ? G.challenge.ctrl : opt.ctrl) === CTRL.ride ? CTRL.ride : CTRL.tap;
-  G.course = new Course(G.seed, G.level);
-  G.sim = G.ctrl === CTRL.ride ? new RideSim(G.course) : new Sim(G.course);
+  const cc = G.challenge ? G.challenge.ctrl : opt.ctrl;
+  G.ctrl = cc === CTRL.slalom ? CTRL.slalom : cc === CTRL.ride ? CTRL.ride : CTRL.tap;
+  G.course = G.ctrl === CTRL.slalom ? new SlalomCourse(G.seed, G.level) : new Course(G.seed, G.level, G.ctrl);
+  layout(true);   // free ride shows a longer stretch ahead (speed boost) → other world scale on narrow screens
+  G.sim = G.ctrl === CTRL.slalom ? new SlalomSim(G.course) : G.ctrl === CTRL.ride ? new RideSim(G.course) : new Sim(G.course);
+  G.slRes = []; G.slHudAt = -1; G.slDeltaUntil = 0; G.mpStart = 0;
   G.taps = []; G.inputQ = []; G.inputs = []; G.rideQ = []; G.rideSt = 0; G.pad = null; G.streak = 0; G.death = null; G.recordFlag = false;
   G.flipWarned = -1; G.pauses = 0; G.resumeAt = 0; G.pauseAlpha = 1;
   G.ghosts = [];
@@ -4832,7 +5269,7 @@ function prepareRun(opt) {
   document.body.classList.toggle('rideReady', G.ctrl === CTRL.ride);
   updateRideHud();
   $('hudMode').textContent = `${G.label} · ${levelName(G.level)}`;
-  $('hudBest').textContent = G.bestBefore ? 'Rekord ' + G.bestBefore : '';
+  $('hudBest').textContent = G.bestBefore ? 'Rekord ' + (G.ctrl === CTRL.slalom ? slTime(G.bestBefore) : G.bestBefore) : '';
   updateRaceHud();
   showScreen(null);
   setHud(true);
@@ -4841,10 +5278,17 @@ function prepareRun(opt) {
   $('tapHint').classList.toggle('ride', G.ctrl === CTRL.ride);
   if (G.mp) $('tapHint').classList.add('hidden');
   document.body.classList.toggle('ride', G.ctrl === CTRL.ride);
+  document.body.classList.toggle('slalom', G.ctrl === CTRL.slalom);
+  if (G.ctrl === CTRL.slalom) {   // a finite time trial: everybody starts on a countdown so the clock begins at tick 0
+    $('tapHint').classList.add('hidden');
+    $('hudScore').textContent = '0:00,00'; slalomHud(G.sim, true);
+    G.mpStart = performance.now() + 3600; G.mpCount = 0;
+  }
   clearHeld();
   A.setPaused(false);
   A.setMusicState('play');
   blurActive();
+  if (coarse && innerHeight > innerWidth * 1.15 && (S.rotHint | 0) < 3) { S.rotHint = (S.rotHint | 0) + 1; saveSettings(); showBanner('Natoč telefon na šířku', 'Loďka bude větší a uvidíš celou řeku', 2800, 1); }
 }
 
 // rec: a decoded run ({ ctrl, taps } or { ctrl, inputs })
@@ -4879,8 +5323,11 @@ function advanceLive(gh, tickNow, maxSteps) {
   while (gh.sim.alive && gh.sim.tick < lim && n++ < maxSteps) stepLive(gh);
 }
 function makeGhost(name, rec, style, finalScore) {
-  const ride = (rec.ctrl | 0) === CTRL.ride;
-  return { name, ride, taps: rec.taps || [], inputs: rec.inputs || [], ti: 0, ii: 0, st: 0, sim: ride ? new RideSim(G.course) : new Sim(G.course), style, pad: null, finalScore };
+  const ctrl = rec.ctrl | 0, ride = ctrl >= CTRL.ride;
+  const gh = { name, ride, taps: rec.taps || [], inputs: rec.inputs || [], ti: 0, ii: 0, st: 0, sim: ctrl === CTRL.slalom ? new SlalomSim(G.course) : ride ? new RideSim(G.course) : new Sim(G.course), style, pad: null, finalScore };
+  // slalom: the ghost's gate-by-gate times (clock + penalties) for the live delta, from a headless replay
+  if (ctrl === CTRL.slalom) { try { gh.splits = runSlalom(G.seed, gh.inputs, G.level, (rec.endTick || 0) + 5).splits; } catch { gh.splits = []; } }
+  return gh;
 }
 
 function bestFor(mode, seed) {
@@ -4897,7 +5344,7 @@ function beginPlay(ts) {
   G.state = 'play';
   G.t0 = ts;
   if (S.tutorial) $('tapHint').classList.add('playing'); else $('tapHint').classList.add('hidden');
-  if (G.ctrl === CTRL.ride) { G.rideQ.push([0, rideState()]); document.body.classList.remove('rideReady'); }
+  if (G.ctrl >= CTRL.ride) { G.rideQ.push([0, rideState()]); document.body.classList.remove('rideReady'); }
   else if (!G.mp) queueTap(ts);
 }
 
@@ -4921,7 +5368,7 @@ function updatePlay(now) {
     G.inputQ = G.inputQ.map(t => Math.max(sim.tick, t - shift)).filter(t => (t > last ? ((last = t), true) : false));
     for (const q of G.rideQ) q[0] = Math.max(sim.tick, q[0] - shift);
   }
-  const ride = G.ctrl === CTRL.ride;
+  const ride = G.ctrl >= CTRL.ride;
   while (sim.alive && sim.tick < target) {
     let tap = false;
     if (ride) {
@@ -4948,6 +5395,11 @@ function updatePlay(now) {
     for (const ev of sim.events) handleEvent(ev, sim, false);
     sim.events.length = 0;
   }
+  if (G.ctrl === CTRL.slalom) {
+    const tot = sim.tick + sim.pen;
+    if (G.slClock !== tot && (sim.tick % 6 === 0 || sim.pen !== G.slPenSeen)) { G.slClock = tot; G.slPenSeen = sim.pen; $('hudScore').textContent = fmtTime(tot); }
+    slalomHud(sim);
+  }
   // ghost wakes (from the stern)
   if (S.ghosts) for (const gh of G.ghosts) {
     if (!gh.sim.alive) continue;
@@ -4960,9 +5412,9 @@ function updatePlay(now) {
   if (b !== G.curBiome) { G.curBiome = b; A.setScene({ biome: b }); if (sim.x > 200) showBanner(BIOMES[b].name, BIOMES[b].sub, 1800); }
   const nextFlip = G.course.flips.find(fx => fx > sim.x);
   if (nextFlip !== undefined && nextFlip - sim.x < 520 && G.flipWarned !== nextFlip) {
-    G.flipWarned = nextFlip;
+    G.flipWarned = nextFlip; A.warn();
     const willBe = G.course.currentAt(nextFlip + 1);
-    if (G.ctrl === CTRL.ride) showBanner('⚠ Klidná voda, pak protiproud', 'V klidné vodě se síla vrací 3× rychleji', 1600, 2);
+    if (G.ctrl >= CTRL.ride) showBanner('⚠ Klidná voda, pak protiproud', 'V klidné vodě se síla vrací 3× rychleji', 1600, 2);
     else showBanner('⚠ Klidná voda, pak protiproud', willBe < 0 ? 'Za klidnou vodou tě proud potáhne nahoru' : 'Za klidnou vodou se proud vrací dolů', 1600, 2);
   }
   updateRaceHud();
@@ -4976,8 +5428,15 @@ function rideHint(bit, text) {
   S.rideTut |= bit; saveSettings(); G.hintAt = VT;
   showBanner(text, '', 1500, 0);
 }
+// second hint mask (the first one is full)
+function rideHint2(bit, text) {
+  if (G.ctrl !== CTRL.ride || ((S.rideTut2 | 0) & bit) || VT - (G.hintAt || -9) < 3) return;
+  S.rideTut2 = (S.rideTut2 | 0) | bit; saveSettings(); G.hintAt = VT;
+  showBanner(text, '', 1500, 0);
+}
 function rideTick(sim) {
   const now = VT;
+  if (sim.boost > 0.1) rideHint2(1, 'Střídej nahoru / dolů — loď zrychlí, ale bere sílu');
   // release after a real hold → glide hint
   if (G.rideSt !== 0) { if (!G.holdFrom) G.holdFrom = now; }
   else { if (G.holdFrom && now - G.holdFrom > 0.25) rideHint(1, 'Pusť a loď klouže dál'); G.holdFrom = 0; }
@@ -5022,6 +5481,38 @@ function updateRaceHud() {
   if (raceHtml !== html) el.innerHTML = raceHtml = html;
 }
 
+// ── Slalom na čas ──
+function slalomGate(ev, sim) {
+  const n = sim.c.gates.length;
+  G.slRes[ev.n] = ev.ok ? 'ok' : 'miss';
+  if (ev.ok) A.gate(Math.min(20, sim.streak));
+  // live delta against the best ghost (your record or the challenger): clock + penalties at this gate
+  const gh = G.ghosts.find(q => q.splits && q.splits[ev.n] !== undefined);
+  if (gh) {
+    const d = (sim.splits[ev.n] - gh.splits[ev.n]) / TICK_RATE, el = $('hudSlDelta');
+    el.textContent = 'Δ ' + (d <= 0 ? '−' : '+') + Math.abs(d).toFixed(2).replace('.', ',') + ' s';
+    el.className = d <= 0 ? 'good' : 'bad'; G.slDeltaUntil = performance.now() + 1800;
+  }
+  if (ev.n === n - 1) showBanner('Do cíle!', '', 900, 0);
+  slalomHud(sim, true);
+}
+function slalomHud(sim, force) {
+  if (!force && G.slHudAt === sim.tick) return;
+  G.slHudAt = sim.tick;
+  const n = sim.c.gates.length;
+  $('hudSlGate').textContent = 'Branka ' + Math.min(n, sim.cross + (sim.cross < n ? 1 : 0)) + '/' + n;
+  if (!sim.pen) $('hudSlPen').textContent = '';
+  if (G.slDeltaUntil && performance.now() > G.slDeltaUntil) { G.slDeltaUntil = 0; $('hudSlDelta').textContent = ''; }
+}
+function onSlalomFinish(sim) {
+  G.state = 'dead';
+  G.deadAt = performance.now();
+  A.record(); A.setMusicState('over'); Native.haptic('record');
+  $('hudScore').textContent = slTime(sim.score);   // the clock shows exactly the result
+  showBanner('V cíli!', slTime(sim.score), 1500, 2);
+  finishRun();
+  setTimeout(() => { if (G.state === 'dead') showOver(); }, 1500);
+}
 function onPlayerCrash(sim, ev) {
   G.state = 'dead';
   G.deadAt = performance.now();
@@ -5033,7 +5524,7 @@ function onPlayerCrash(sim, ev) {
   A.setMusicState('over');
   Native.haptic('crash');
   finishRun();
-  setTimeout(() => { if (G.state === 'dead') showOver(); }, 1050);
+  setTimeout(() => { if (G.state === 'dead') showOver(); }, 750);
 }
 
 function encodeRun(run) {
@@ -5067,6 +5558,7 @@ function finishRun() {
   if (G.mode === 'daily' && G.dayKey && dailySeed(G.dayKey) === G.seed) T.daily[G.dayKey] = Math.max(T.daily[G.dayKey] || 0, sim.score);
   if (G.mode === 'river' && G.riverName && riverSeed(G.riverName) === G.seed) T.rivers[G.riverName] = Math.max(T.rivers[G.riverName] || 0, sim.score);
   const st = REC.stats;
+  if (G.ctrl === CTRL.slalom) { st.slalomRuns = (st.slalomRuns || 0) + 1; }
   if (G.ctrl === CTRL.ride) { st.rideRuns = (st.rideRuns || 0) + 1; st.rideTired = (st.rideTired || 0) + sim.tiredCount; st.rideBestStreak = Math.max(st.rideBestStreak || 0, sim.bestStreak); }
   st.runs++; st.gates += sim.gatesPassed; st.stars += sim.starsGot; st.strokes += sim.strokes; st.dist += Math.round(sim.x / 10); st.time += sim.deathTick / TICK_RATE;
   if (G.challenge) {
@@ -5080,35 +5572,47 @@ function finishRun() {
   if (G.newBest) { A.record(); setTimeout(() => Native.haptic('record'), 350); }
 }
 
-const OVER_LOCK = 650;   // ms the game-over card ignores input (players often keep tapping as they crash)
+const OVER_LOCK = 450;   // ms the game-over card ignores input (players often keep tapping as they crash)
 function showOver() {
   G.state = 'over';
   G.overAt = performance.now();
   setHud(false);
-  const sim = G.sim;
-  $('ovTitle').textContent = G.newBest ? 'Nový rekord!' : pickCrashTitle(sim.death && sim.death.cause);
+  const sim = G.sim, slalom = G.ctrl === CTRL.slalom;
+  $('ovTitle').textContent = G.newBest ? (slalom ? 'Nový rekord trati!' : 'Nový rekord!') : slalom ? 'V cíli!' : pickCrashTitle(sim.death && sim.death.cause);
   $('ovTitle').classList.toggle('gold', G.newBest);
-  $('ovScore').textContent = sim.score;
+  if (slalom) $('ovScore').textContent = slTime(sim.score) + ' ' + slMedal(G.level, SL_CAP - sim.score);
+  else countUp($('ovScore'), sim.score, clamp(250 + sim.score * 10, 300, 900));
+  $('ovScore').parentElement.classList.toggle('time', slalom);
   $('ovLabel').textContent = `${G.label} · ${levelName(G.level)}`;
-  $('ovGates').textContent = sim.gatesPassed;
-  $('ovStars').textContent = sim.starsGot;
+  $('ovL1').textContent = slalom ? 'Čisté branky' : 'Branky'; $('ovL2').innerHTML = slalom ? 'Tresty' : '<i class="star">★</i> Hvězdy';
+  $('ovGates').textContent = slalom ? sim.cleanGates + '/' + sim.c.gates.length : sim.gatesPassed;
+  $('ovStars').textContent = slalom ? '+' + (sim.pen / TICK_RATE).toFixed(0) + ' s' : sim.starsGot;
   const ride = G.ctrl === CTRL.ride;
-  $('ovL3').textContent = ride ? 'Nejdelší série' : 'Vzdálenost';
-  $('ovL4').textContent = ride ? 'Síla došla' : 'Čas';
-  $('ovDist').textContent = ride ? sim.bestStreak : Math.round(sim.x / 10) + ' m';
-  $('ovTime').textContent = ride ? sim.tiredCount + '×' : secs(sim.deathTick / TICK_RATE);
-  $('ovTip').hidden = !ride;
-  if (ride) $('ovTip').textContent = (sim.nears ? `Těsně ${sim.nears}× · ` : '') + (sim.tiredCount ? 'Tip: pusť dřív, než bar zčervená — série ti zůstane.'
+  $('ovL3').textContent = slalom ? 'Čistý čas' : ride ? 'Nejdelší série' : 'Vzdálenost';
+  $('ovL4').textContent = slalom ? 'Dotyky · vynechané' : ride ? 'Síla došla' : 'Čas';
+  $('ovDist').textContent = slalom ? fmtTime(sim.finishTick) : ride ? sim.bestStreak : Math.round(sim.x / 10) + ' m';
+  $('ovTime').textContent = slalom ? sim.touches + ' · ' + sim.misses : ride ? sim.tiredCount + '×' : secs(sim.deathTick / TICK_RATE);
+  $('ovTip').hidden = !(ride || slalom);
+  if (slalom) $('ovTip').textContent = sim.misses ? 'Tip: vynechaná branka stojí ' + (sim.S.pen.miss / TICK_RATE) + ' s — raději zpomal a zamiř do středu.'
+    : sim.touches ? 'Tip: tyče tě stojí ' + (sim.S.pen.touch / TICK_RATE) + ' s — drž střed brány a nepřidávej záběr těsně před tyčí.'
+    : 'Čistá jízda! Plynulé oblouky šetří sílu a dávají rychlost.';
+  if (ride && !slalom) $('ovTip').textContent = (sim.nears ? `Těsně ${sim.nears}× · ` : '') + (sim.tiredCount ? 'Tip: pusť dřív, než bar zčervená — série ti zůstane.'
     : sim.bestStreak < 5 ? 'Tip: opačný záběr loď zastaví — nemusíš čekat.'
     : sim.flowOn || sim.bestStreak >= 15 ? 'Tip: v klidné vodě se síla vrací třikrát rychleji.' : 'Tip: krátké rytmické záběry šetří sílu, dlouhé držení je sprint.');
   const best = Math.max(bestFor(G.mode, G.seed), sim.score);
-  const pz = G.pauses ? ` · pauzy: ${G.pauses}` : '';
-  $('ovBest').textContent = (G.mode === 'free' && !G.challenge ? `${ride ? 'Nejlepší volná jízda' : 'Nejlepší volná plavba'}: ${best}` : `Tvůj rekord na této řece: ${best}`) + pz;
+  const pz = (G.pauses ? ` · pauzy: ${G.pauses}` : '') + (!slalom && !G.newBest && G.bestBefore > sim.score && !G.mp ? ` · chybělo ti ${bodu(G.bestBefore - sim.score)} k rekordu` : '');
+  $('ovBest').textContent = slalom ? 'Rekord trati: ' + slTime(best) + pz : (G.mode === 'free' && !G.challenge ? `${ride ? 'Nejlepší volná jízda' : 'Nejlepší volná plavba'}: ${best}` : `Tvůj rekord na této řece: ${best}`) + pz;
   const res = $('ovChallenge');
   if (G.challenge) {
     const ch = G.challenge, t = ch.score, m = sim.score, n = escapeHtml(ch.name || 'Soupeř');
     const note = ch.verified ? '' : '<span>Pozor: soupeřův záznam nešel ověřit — počítá se skóre, které jeho jízda opravdu dala.</span>';
     res.className = 'result ' + (m > t ? 'win' : m === t ? 'draw' : 'lose');
+    if (slalom) {
+      const dd = Math.abs(m - t) / TICK_RATE, ds = dd.toFixed(2).replace('.', ',') + ' s';
+      res.innerHTML = (m > t ? `<b>Výhra o ${ds}</b><span>Výzva splněna — ${n} má co dohánět. Pošli odvetu!</span>`
+        : m === t ? `<b>Remíza</b><span>Přesně stejný čas jako ${n}. Ještě jeden pokus?</span>`
+        : `<b>Prohra o ${ds}</b><span>Duch ukazuje cestu — zkus to znovu.</span>`) + note;
+    } else
     res.innerHTML = (m > t ? `<b>Výhra ${m} : ${t}</b><span>Výzva splněna — ${n} má co dohánět. Pošli odvetu!</span>`
       : m === t ? `<b>Remíza ${m} : ${t}</b><span>Přesně stejně jako ${n}. Ještě jeden pokus?</span>`
       : `<b>Prohra ${m} : ${t}</b><span>${n} vede o ${bodu(t - m)}. Duch ukazuje cestu — zkus to znovu.</span>`) + note;
@@ -5121,6 +5625,7 @@ function showOver() {
   const freshRiver = G.mode === 'free' && !G.challenge;
   $('btnSame').hidden = !freshRiver;
   document.querySelector('#scrOver [data-action="share"]').hidden = !!G.mp;
+  { const won = G.challenge && sim.score > G.challenge.score, sb = document.querySelector('#scrOver [data-action="share"]'); sb.querySelector('span').textContent = won ? 'Pošli odvetu' : 'Vyzvat kamarády'; sb.classList.toggle('primary', !!won); }
   $('btnRetry').style.gridColumn = freshRiver ? '' : '1 / -1';
   $('btnRetry').querySelector('span').textContent = G.mp ? 'Do místnosti' : freshRiver ? 'Nová řeka' : 'Znovu';
   $('ovHint').textContent = G.mp ? 'Skóre ostatních se ověřuje přehráním jejich jízdy.' : (freshRiver ? 'Mezerník = nová řeka' : 'Mezerník = znovu') + ' · Každá jízda je uložená jako ověřitelný záznam.';
@@ -5130,8 +5635,14 @@ function showOver() {
   showScreen('scrOver');
 }
 
+function countUp(el, to, ms) {
+  if (reducedMotion || to < 3) { el.textContent = to; return; }
+  const t0 = performance.now(); el.textContent = 0;
+  (function f(t) { const k = Math.min(1, (t - t0) / ms); el.textContent = Math.round(to * (1 - Math.pow(1 - k, 3))); if (k < 1 && G.state === 'over') requestAnimationFrame(f); else el.textContent = to; })(t0);
+}
 function pickCrashTitle(cause) {
-  const t = { rocks: ['Na skále!', 'Kámen nepovolil', 'Rozbitá špice'], logs: ['Uvíznutí v kládách', 'Dřevo vyhrálo'], boom: ['Plovoucí zátaras!', 'Srážka s bójí'], bridge: ['Pilíř mostu!', 'Most stojí, loďka ne'], bank: ['Na mělčině!', 'Břeh tě zastavil'] }[cause] || ['Ztroskotání!'];
+  if (!cause) return 'Ztroskotání!';
+  const t = { rocks: ['Na skále!', 'Kámen nepovolil', 'Rozbitá špice'], logs: ['Uvíznutí v kládách', 'Dřevo vyhrálo'], boom: ['Plovoucí zátaras!', 'Srážka s bójí'], bridge: ['Pilíř mostu!', 'Most stojí, loďka ne'], channel: ['Stěna průplavu!', 'Průplav je úzký'], garden: ['Kamenná zahrada!', 'Mezi balvany to nevyšlo'], bank: ['Na mělčině!', 'Břeh tě zastavil'] }[cause] || ['Ztroskotání!'];
   return t[Math.floor(Math.random() * t.length)];
 }
 
@@ -5175,8 +5686,9 @@ function finishResume() {
   const wasCounting = !!G.resumeAt;
   G.resumeAt = 0; G.lastCount = 0;
   G.state = G.prevState;
+  if (G.state === 'ready' && G.mpStart && !G.mp) G.mpStart = performance.now() + 2600;   // restart the start countdown
   if (G.state === 'play') G.t0 += performance.now() - G.pauseAt;
-  if (G.ctrl === CTRL.ride) rideInput(performance.now());
+  if (G.ctrl >= CTRL.ride) rideInput(performance.now());
   if (wasCounting) A.countdown(0);
   A.setPaused(false);
 }
@@ -5288,7 +5800,7 @@ function mpJoin(code) {
   MP.id = '';
   ws.onopen = () => {
     MP.hb = setInterval(() => mpSend({ k: 'hb' }), 5000);
-    mpSend({ k: 'hello', proto: 1, name: MP.me.name, token: MP.me.token });
+    mpSend({ k: 'hello', proto: 1, name: MP.me.name, token: MP.me.token, rr: RIDE_RULES });
     for (let i = 0; i < 4; i++) setTimeout(() => mpSend({ k: 'ping', c: Date.now() }), i * 180);
   };
   ws.onmessage = e => { let m; try { m = JSON.parse(e.data); } catch { return; } if (ws === MP.ws) mpOnMsg(m); };
@@ -5324,6 +5836,7 @@ function mpOnMsg(m) {
   switch (m.k) {
     case 'welcome': clearTimeout(MP.welcomeT); MP.id = m.id; mpView('lobby'); $('mpRoom').textContent = MP.code; break;
     case 'hb': break;
+    case 'mismatch': MP.mmAt = performance.now(); toast('Někdo má starší verzi hry', 4000); renderLobby(); break;
     case 'err':
       MP.lastErr = MP_ERR[m.e] || 'Připojení odmítnuto.';
       if (m.e === 'auth') MP.needReg = true;   // the token stays; confirm or pick a nickname again
@@ -5350,7 +5863,8 @@ function renderLobby() {
   $('mpReady').classList.toggle('on', ready);
   $('mpReady').querySelector('span').textContent = ready ? 'Připraven ✓ (zrušit)' : 'Jsem připraven';
   const n = st.players.length, r = st.players.filter(p => p.ready).length;
-  mpMsg('mpLobbyMsg', st.phase === 'race' ? 'Právě probíhá závod — přidáš se v dalším kole.'
+  if (performance.now() - (MP.mmAt || -1e9) < 8000) mpMsg('mpLobbyMsg', 'Někdo má starší verzi hry — Volná jízda se nespustí. Obnovte stránku (Ctrl+F5) nebo zvolte Plavbu.', true);
+  else mpMsg('mpLobbyMsg', st.phase === 'race' ? 'Právě probíhá závod — přidáš se v dalším kole.'
     : n < 2 ? 'Čekáme na další hráče — pošli jim kód nebo odkaz (Pozvat).'
     : performance.now() - (MP.rulesAt || -1e9) < 5000 && !ready ? 'Zakladatel změnil pravidla — potvrď připravenost znovu.'
     : r < n ? `Start, až budou připraveni všichni (${r}/${n}).` : 'Startujeme…');
@@ -5377,7 +5891,7 @@ function mpVerifyResults(m) {
       try {
         const r = Replay.decode(x.code);
         ok = r.seed === m.seed && r.level === m.level && (r.ctrl | 0) === m.ctrl && r.score === x.score && Replay.verify(r).ok;
-        const sig = (r.ctrl | 0) === CTRL.ride ? normInputs(r.inputs) : r.taps.join(',');
+        const sig = (r.ctrl | 0) >= CTRL.ride ? normInputs(r.inputs) : r.taps.join(',');
         const gh = x.id !== MP.id ? raceGhost(x.id) : null;
         const complete = gh && gh.done && !gh.left && !gh.lost;   // a 'done' after all of their inputs on one socket
         // without their full live stream, a long run identical to someone else's is a copy
@@ -5424,10 +5938,11 @@ function mpTick(now) {
     const left = G.mpStart - now;
     if (left <= 0) { G.mpCount = 0; showBanner('Jeď!', '', 700, 2); A.countdown(0); beginPlay(G.mpStart); G.mpStart = 0; return; }
     const n = Math.ceil(left / 1000);
-    if (n !== G.mpCount && n <= 3) { G.mpCount = n; showBanner(String(n), 'Závod začíná', 900, 2); A.countdown(n); }
-    else if (n !== G.mpCount && n > 3) { G.mpCount = n; showBanner('Připrav se', G.ghosts.length + 1 + ' ' + pl(G.ghosts.length + 1, 'hráč', 'hráči', 'hráčů') + ' na startu', 900, 2); }
+    if (n !== G.mpCount && n <= 3) { G.mpCount = n; showBanner(String(n), G.mp ? 'Závod začíná' : 'Slalom začíná', 900, 2); A.countdown(n); }
+    else if (n !== G.mpCount && n > 3) { G.mpCount = n; showBanner('Připrav se', G.mp ? G.ghosts.length + 1 + ' ' + pl(G.ghosts.length + 1, 'hráč', 'hráči', 'hráčů') + ' na startu' : G.course.gates.length + ' branek, co nejrychleji do cíle', 900, 2); }
     return;
   }
+  if (!G.mp) return;
   if (G.state === 'play') mpFlush(now, G.sim.tick);
   // after our crash the others keep racing behind the results card
   if ((G.state === 'dead' || G.state === 'over') && G.t0) {
@@ -5471,7 +5986,7 @@ function mpInvite() {
 const held = { up: new Set(), down: new Set() };
 let heldLast = 0;   // the direction pressed most recently wins while both are held
 const rideState = () => held.up.size && held.down.size ? heldLast : held.up.size ? RIDE_UP : held.down.size ? RIDE_DOWN : 0;
-const rideActive = () => G.ctrl === CTRL.ride && (G.state === 'play' || G.state === 'ready');
+const rideActive = () => G.ctrl >= CTRL.ride && (G.state === 'play' || G.state === 'ready');
 function setHeld(kind, src, on, ts) {
   const set = held[kind];
   if (!set || on === set.has(src)) return;
@@ -5480,11 +5995,11 @@ function setHeld(kind, src, on, ts) {
 }
 function clearHeld() { held.up.clear(); held.down.clear(); heldLast = 0; }
 function rideInput(ts) {
-  if (G.ctrl !== CTRL.ride || !G.sim) return;
+  if (G.ctrl < CTRL.ride || !G.sim) return;
   const now = performance.now();
   if (!(ts > 0) || Math.abs(ts - now) > 1000) ts = now;
   const st = rideState();
-  if (G.state === 'ready') { if ((st & (RIDE_UP | RIDE_DOWN)) && !G.mp) { unlockAudio(); beginPlay(ts); } return; }
+  if (G.state === 'ready') { if ((st & (RIDE_UP | RIDE_DOWN)) && !G.mp && !G.mpStart) { unlockAudio(); beginPlay(ts); } return; }
   if (G.state !== 'play') return;
   let tick = Math.ceil((ts - G.t0) / TICK_MS - 1e-6);
   if (tick < G.sim.tick) tick = G.sim.tick;
@@ -5510,19 +6025,22 @@ function ridePointer(e) {
   const r = stageEl.getBoundingClientRect(), upper = e.clientY < r.top + r.height / 2;
   setHeld('up', id, upper, e.timeStamp); setHeld('down', id, !upper, e.timeStamp);
 }
-for (const el of [cv, $('tapLayer')]) el.addEventListener('pointerdown', e => { if (!rideActive()) return; e.preventDefault(); try { el.setPointerCapture(e.pointerId); } catch { /* ignore */ } ridePointer(e); }, { passive: false });
+for (const el of [cv, $('tapLayer')]) el.addEventListener('pointerdown', e => { if (G.state === 'dead' && G.ctrl >= CTRL.ride) { e.preventDefault(); skipDead(); return; } if (!rideActive()) return; e.preventDefault(); try { el.setPointerCapture(e.pointerId); } catch { /* ignore */ } ridePointer(e); }, { passive: false });
 for (const t of ['pointermove', 'pointerup', 'pointercancel']) window.addEventListener(t, ridePointer);
 const RIDE_KEYS = { ArrowUp: 'up', KeyW: 'up', ArrowDown: 'down', KeyS: 'down' };
-window.addEventListener('keyup', e => { const k = RIDE_KEYS[e.code]; if (k && G.ctrl === CTRL.ride) setHeld(k, 'k' + e.code, false, e.timeStamp); });
+window.addEventListener('keyup', e => { const k = RIDE_KEYS[e.code]; if (k && G.ctrl >= CTRL.ride) setHeld(k, 'k' + e.code, false, e.timeStamp); });
 window.addEventListener('blur', () => { clearHeld(); rideInput(); });
 document.addEventListener('visibilitychange', () => { if (document.hidden) { clearHeld(); rideInput(); } });
 
+const DEAD_SKIP_MS = 350;
+function skipDead() { if (G.state === 'dead' && performance.now() - G.deadAt > DEAD_SKIP_MS) showOver(); }
 function press(ts) {
   const now = performance.now();
   if (!(ts > 0) || Math.abs(ts - now) > 1000) ts = now;   // old WebViews report epoch timestamps
   unlockAudio();
-  if (G.state === 'ready') { if (!G.mp) beginPlay(ts); return; }
-  if (G.state === 'play' && G.ctrl !== CTRL.ride) queueTap(ts);
+  if (G.state === 'dead') { skipDead(); return; }
+  if (G.state === 'ready') { if (!G.mp && !G.mpStart) beginPlay(ts); return; }
+  if (G.state === 'play' && G.ctrl < CTRL.ride) queueTap(ts);
 }
 cv.addEventListener('pointerdown', e => {
   if (rideActive()) return;
@@ -5552,9 +6070,11 @@ window.addEventListener('keydown', e => {
     if (e.repeat || overLocked()) { e.preventDefault(); return; }
     if (e.code === 'Space' || e.code === 'KeyR' || (e.code === 'Enter' && document.activeElement === document.body)) { e.preventDefault(); unlockAudio(); restart(false); return; }
   }
+  if (G.state === 'dead' && (TAP_KEYS.has(e.code) || RIDE_KEYS[e.code])) { e.preventDefault(); if (!e.repeat) skipDead(); return; }
   if (rideActive() && RIDE_KEYS[e.code]) { e.preventDefault(); if (!e.repeat) setHeld(RIDE_KEYS[e.code], 'k' + e.code, true, e.timeStamp); return; }
   if (TAP_KEYS.has(e.code) && (G.state === 'play' || G.state === 'ready')) { e.preventDefault(); if (!e.repeat) press(e.timeStamp); return; }
   if (TAP_KEYS.has(e.code) && G.state === 'paused' && G.resumeAt) { e.preventDefault(); return; }  // countdown running
+  if (e.code === 'KeyM' && !e.repeat && !e.ctrlKey && !e.metaKey && !e.altKey) { toggleMute(); return; }
   if (e.code === 'KeyH' && e.shiftKey) { S.hitbox = !S.hitbox; saveSettings(); }
   if (e.code === 'KeyF' && e.shiftKey) { S.fps = !S.fps; saveSettings(); applyFps(); $('setFps').checked = S.fps; }
 });
@@ -5588,9 +6108,10 @@ function pollGamepads() {
     }
     if ([0, 2, 3, 5, 7].some(edge)) {
       if (G.state === 'play' || G.state === 'ready') press(ts);
+      else if (G.state === 'dead') skipDead();
       else if (G.state === 'over' && currentScreen === 'scrOver' && !overLocked()) restart(false);
       else if (G.state === 'paused' && currentScreen === 'scrPause') resume();
-      else if (G.state === 'menu' && currentScreen === 'scrMenu' && edge(0)) prepareRun({ mode: 'free', seed: newRandomSeed(), label: 'Volná plavba' });
+      else if (G.state === 'menu' && currentScreen === 'scrMenu' && edge(0)) startFree();
     }
     if (edge(1)) { // B = stroke while playing, otherwise back
       if (G.state === 'play' || G.state === 'ready') press(ts);
@@ -5638,42 +6159,74 @@ function toast(msg, ms = 2400) {
 function escapeHtml(s) { return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
 
 const LEVEL_INFO = ['Klidnější voda, bez protiproudu, větší mezery', 'Peřeje s protiproudem a pohyblivými zátarasy', 'Rychlá a těsná divoká voda, protiproud brzy'];
+function syncCtrlButtons() {
+  document.querySelectorAll('[data-action="set-ctrl"]').forEach(b => { const on = +b.dataset.ctrl === S.ctrl; b.classList.toggle('on', on); b.setAttribute('aria-checked', on ? 'true' : 'false'); });
+}
 function syncLevelButtons() {
+  syncCtrlButtons();
   document.querySelectorAll('[data-action="set-level"]').forEach(b => {
     const on = +b.dataset.level === S.level;
     b.classList.toggle('on', on); b.setAttribute('aria-checked', on ? 'true' : 'false');
   });
   document.querySelectorAll('.level-info').forEach(el => { el.textContent = LEVEL_INFO[S.level]; });
 }
+function refreshSlalom() {
+  const T = LR(S.level, CTRL.slalom), lv = S.level;
+  const fmt = sc => sc ? slTime(sc) + ' ' + slMedal(lv, SL_CAP - sc) : '—';
+  for (const n of [1, 2, 3]) { const r = T.seeds[seedHex(trackSeed(n))]; $('slBest' + n).textContent = fmt(r && r.best); }
+  const dk = utcDayKey();
+  $('slBestDaily').textContent = fmt(T.daily[dk]);
+  $('slBestFree').textContent = fmt(T.free.best);
+  const m = SL_MEDALS[lv];
+  $('slMedals').textContent = '🥇 do ' + m[0] + ' s · 🥈 do ' + m[1] + ' s · 🥉 do ' + m[2] + ' s';
+  const pen = SL_LEVELS[lv].pen;
+  $('slRules').textContent = 'Dotek tyče +' + pen.touch / TICK_RATE + ' s · vynechaná branka +' + pen.miss / TICK_RATE + ' s · kámen +' + pen.rock / TICK_RATE + ' s' + (pen.bank ? ' · břeh +' + pen.bank / TICK_RATE + ' s' : ' · břeh bez trestu');
+  syncLevelButtons();
+}
 function refreshMenu() {
-  const T = LR(S.level);
-  $('menuBestFree').textContent = T.free.best ? 'rekord ' + T.free.best : 'nová řeka pokaždé';
-  const TR = LR(S.level, CTRL.ride);
-  $('menuBestRide').textContent = TR.free.best ? 'rekord ' + TR.free.best : 'drž a pádluj';
+  syncMuteIcons();
+  { const em = document.querySelector('[data-action="open-mp"] .new'); if (em) em.hidden = REC.stats.mpRaces > 0; }
+  { const em = document.querySelector('[data-action="open-slalom"] .new'); if (em) em.hidden = REC.stats.slalomRuns > 0; }
+  { const T = LR(S.level, CTRL.slalom), best = T.free.best || Math.max(0, ...Object.values(T.seeds).map(r => r.best || 0)); $('menuBestSlalom').textContent = best ? 'nejlepší ' + slTime(best) : 'branky na čas'; }
+  const T = LR(S.level, S.ctrl);
+  $('menuBestFree').textContent = T.free.best ? 'rekord ' + T.free.best : S.ctrl === CTRL.ride ? 'drž nahoru / dolů' : 'ťukej a uhýbej';
   const dk = utcDayKey();
   $('menuBestDaily').textContent = T.daily[dk] ? 'dnes ' + T.daily[dk] : 'stejná řeka pro všechny';
   $('nameInput').value = S.name;
   syncLevelButtons();
 }
 
+const ctrlName = c => c === CTRL.ride ? 'Volná jízda' : 'Volná plavba';
+// the very first free-ride run happens on Děti, so the glide is learned on wide gaps
+function firstRideLevel() { return S.ctrl === CTRL.ride && !(REC.stats.rideRuns > 0) && S.level > 0 ? 0 : undefined; }
+function startFree() {
+  const lv = firstRideLevel();
+  prepareRun({ mode: 'free', seed: newRandomSeed(), label: ctrlName(S.ctrl), ctrl: S.ctrl, level: lv });
+  if (lv === 0) toast('První jízda poběží na úrovni Děti — Normální si zkusíš po ní', 4500);
+}
 function startDaily() {
   const dk = utcDayKey();
   G.dayKey = dk;
-  prepareRun({ mode: 'daily', seed: dailySeed(dk), label: modeLabel('daily', dk) });
+  const lv = firstRideLevel();
+  prepareRun({ mode: 'daily', seed: dailySeed(dk), label: modeLabel('daily', dk), ctrl: S.ctrl, level: lv });
+  if (lv === 0) toast('První jízda poběží na úrovni Děti', 4000);
 }
 function startRiver(name) {
   name = riverName(name);
   if (!name) { toast('Zadej název řeky'); return; }
   G.riverName = name;
-  prepareRun({ mode: 'river', seed: riverSeed(name), label: modeLabel('river', name) });
+  prepareRun({ mode: 'river', seed: riverSeed(name), label: modeLabel('river', name), ctrl: S.ctrl, level: firstRideLevel() });
 }
 
 // What a code claims about its river is only shown when the seed proves it.
 function describeSeed(r) {
+  if (r.ctrl === CTRL.slalom && r.mode === 0) {
+    for (const n of [1, 2, 3]) if (trackSeed(n) === r.seed) return { mode: 'track', label: 'Trať ' + n, tag: '✓ Trať ' + n };
+  }
   if (r.mode === 1) {
     const m = (r.label || '').match(/(\d{1,2})\. (\d{1,2})\. (\d{4})/);
     const dk = m && `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`;
-    if (dk && dailySeed(dk) === r.seed) return { mode: 'daily', label: modeLabel('daily', dk), dayKey: dk, tag: dk === utcDayKey() ? '✓ dnešní denní výzva' : '✓ denní výzva ' + m[0] + ' (starší)' };
+    if (dk && dailySeed(dk) === r.seed) return { mode: 'daily', label: modeLabel('daily', dk, r.ctrl), dayKey: dk, tag: dk === utcDayKey() ? '✓ dnešní ' + (r.ctrl === CTRL.slalom ? 'denní slalom' : 'denní výzva') : '✓ ' + (r.ctrl === CTRL.slalom ? 'denní slalom ' : 'denní výzva ') + m[0] + ' (starší)' };
     return { mode: 'free', label: 'Výzva', tag: '⚠ tvrdí, že je to denní výzva, ale řeka nesedí' };
   }
   if (r.mode === 2) {
@@ -5681,7 +6234,7 @@ function describeSeed(r) {
     if (nm && riverSeed(nm) === r.seed) return { mode: 'river', label: modeLabel('river', nm), riverName: nm, tag: '✓ ' + modeLabel('river', nm) };
     return { mode: 'free', label: 'Výzva', tag: '⚠ název řeky neodpovídá trati' };
   }
-  return { mode: 'free', label: 'Volná plavba', tag: '' };
+  return { mode: 'free', label: r.ctrl === CTRL.slalom ? 'Slalom' : 'Volná plavba', tag: '' };
 }
 
 let pendingChallenge = null, challengeReturn = null, loadTimer = 0;
@@ -5701,11 +6254,11 @@ function loadChallenge(text) {
     const pz = r.pauses > 0 ? ` · pauzy: ${r.pauses}` : r.pauses === 0 ? ' · bez pauzy' : '';
     box.innerHTML = `
       <div class="ch-head"><span class="avatar">${escapeHtml((r.name || '?').slice(0, 1).toUpperCase())}</span>
-      <div><b>${escapeHtml(r.name || 'Anonym')}</b><small>${escapeHtml(info.label)} · ${levelName(r.level)}${r.ctrl === CTRL.ride ? ' · volná jízda' : ''}</small></div>
-      <div class="ch-score">${r.score}<small>${pl(r.score, 'bod', 'body', 'bodů')}</small></div></div>
-      <div class="ch-meta">${v.ok ? '<span class="ok">✓ Skóre ověřeno přehráním záznamu</span>' : `<span class="bad">⚠ Záznam dává ${bodu(v.score)}, ne ${r.claimed}. Hraje se proti skutečnému výsledku.</span>`}
+      <div><b>${escapeHtml(r.name || 'Anonym')}</b><small>${escapeHtml(info.label)} · ${levelName(r.level)}${r.ctrl === CTRL.slalom ? ' · slalom' : r.ctrl === CTRL.ride ? ' · volná jízda' : ''}</small></div>
+      <div class="ch-score">${r.ctrl === CTRL.slalom ? slTime(r.score) : r.score}<small>${r.ctrl === CTRL.slalom ? 'čas s tresty' : pl(r.score, 'bod', 'body', 'bodů')}</small></div></div>
+      <div class="ch-meta">${v.ok ? '<span class="ok">✓ Skóre ověřeno přehráním záznamu</span>' : `<span class="bad">⚠ Záznam dává ${scoreText(v.score, r.ctrl)}, ne ${scoreText(r.claimed, r.ctrl)}. Hraje se proti skutečnému výsledku.</span>`}
       ${info.tag ? `<span class="${info.tag[0] === '✓' ? 'ok' : 'bad'}">${escapeHtml(info.tag)}</span>` : ''}
-      <span>Délka jízdy ${secs(r.endTick / TICK_RATE)} · ${r.ctrl === CTRL.ride ? 'držené pádlování' : r.taps.length + ' ' + pl(r.taps.length, 'záběr', 'záběry', 'záběrů')}${pz}${mine ? ' · tvůj rekord zde: ' + mine.best : ''}</span></div>`;
+      <span>Délka jízdy ${secs(r.endTick / TICK_RATE)} · ${r.ctrl >= CTRL.ride ? 'držené pádlování' : r.taps.length + ' ' + pl(r.taps.length, 'záběr', 'záběry', 'záběrů')}${pz}${mine ? ' · tvůj rekord zde: ' + scoreText(mine.best, r.ctrl).replace(/^(\d+) bod.*/, '$1') : ''}</span></div>`;
     box.hidden = false;
     $('btnAccept').disabled = false;
     return true;
@@ -5726,7 +6279,7 @@ function acceptChallenge() {
   G.riverName = info.riverName || '';
   challengeReturn = null;
   clearHash();
-  prepareRun({ mode: info.mode, seed: r.seed, label: info.label, challenge: r, level: r.level });
+  prepareRun({ mode: info.mode, seed: r.seed, label: info.label, challenge: r, level: r.level, ctrl: r.ctrl });
 }
 function openChallengeScreen(code, from) {
   challengeReturn = from || null;
@@ -5747,10 +6300,10 @@ function openShare(run) {
   // The link opens the challenge right in the browser; the app reads the code out of the pasted message.
   const hosted = !isNative && /^https?:/.test(location.protocol) && !/^(localhost|127\.0\.0\.1)$/.test(location.hostname);
   const link = `${hosted ? location.origin + location.pathname : WEB_URL}#${run.code}`;
-  const msg = `🛶 PEŘEJE — ${run.label} (${levelName(run.level)}): ${bodu(run.score)}. Překonáš mě?\nHraj tady: ${link}\n(V aplikaci PEŘEJE stačí celou zprávu vložit do Výzev.)`;
+  const msg = `🛶 PEŘEJE — ${run.label} (${levelName(run.level)}): ${scoreText(run.score, run.ctrl)}${run.ctrl === CTRL.slalom ? ' (s tresty)' : ''}. Překonáš mě?\nHraj tady: ${link}\n(V aplikaci PEŘEJE stačí celou zprávu vložit do Výzev.)`;
   $('shareText').value = msg;
   $('shareCode').textContent = run.code;
-  $('shareSummary').textContent = `${run.name} · ${run.label} · ${levelName(run.level)} · ${bodu(run.score)}`;
+  $('shareSummary').textContent = `${run.name} · ${run.label} · ${levelName(run.level)} · ${scoreText(run.score, run.ctrl)}`;
   $('shareName').value = S.name;
   $('btnNativeShare').hidden = !Native.canShare();
   if (currentScreen !== 'scrShare') shareReturn = currentScreen;
@@ -5776,21 +6329,22 @@ let recCtrl = CTRL.tap;   // which control scheme the records screen shows
 function renderRecords() {
   const dk = utcDayKey();
   const st = REC.stats, T = LR(S.level, recCtrl);
+  const fv = v => recCtrl === CTRL.slalom ? (v ? slTime(v) + ' ' + slMedal(S.level, SL_CAP - v) : '–') : (v || 0);
   const rows = [];
   const dailyHex = seedHex(dailySeed(dk));
-  rows.push(`<div class="levels ctrls" role="radiogroup" aria-label="Režim">${[[CTRL.tap, 'Plavba'], [CTRL.ride, 'Volná jízda']].map(([v, n]) => `<button class="lvl${v === recCtrl ? ' on' : ''}" role="radio" aria-checked="${v === recCtrl}" data-action="rec-ctrl" data-ctrl="${v}">${n}</button>`).join('')}</div>`);
+  rows.push(`<div class="levels ctrls" role="radiogroup" aria-label="Režim">${[[CTRL.tap, 'Plavba'], [CTRL.ride, 'Volná jízda'], [CTRL.slalom, 'Slalom']].map(([v, n]) => `<button class="lvl${v === recCtrl ? ' on' : ''}" role="radio" aria-checked="${v === recCtrl}" data-action="rec-ctrl" data-ctrl="${v}">${n}</button>`).join('')}</div>`);
   rows.push(`<div class="levels" role="radiogroup" aria-label="Obtížnost">${[0, 1, 2].map(i => `<button class="lvl${i === S.level ? ' on' : ''}" role="radio" aria-checked="${i === S.level}" data-action="set-level" data-level="${i}">${levelName(i)}</button>`).join('')}</div>`);
   rows.push(`<div class="rec-grid">
-    <div><small>${recCtrl === CTRL.ride ? 'Volná jízda' : 'Volná plavba'}</small><b>${T.free.best || 0}</b>${T.free.code ? `<button class="mini" data-action="share-code" data-code="${T.free.code}">Vyzvat</button>` : ''}</div>
-    <div><small>Dnešní denní výzva</small><b>${T.daily[dk] || 0}</b>${T.seeds[dailyHex] && T.seeds[dailyHex].code ? `<button class="mini" data-action="share-seed" data-seed="${dailyHex}">Vyzvat</button>` : ''}</div>
+    <div><small>${recCtrl === CTRL.slalom ? 'Nová trať' : recCtrl === CTRL.ride ? 'Volná jízda' : 'Volná plavba'}</small><b>${fv(T.free.best)}</b>${T.free.code ? `<button class="mini" data-action="share-code" data-code="${T.free.code}">Vyzvat</button>` : ''}</div>
+    <div><small>${recCtrl === CTRL.slalom ? 'Dnešní denní slalom' : 'Dnešní denní výzva'}</small><b>${fv(T.daily[dk])}</b>${T.seeds[dailyHex] && T.seeds[dailyHex].code ? `<button class="mini" data-action="share-seed" data-seed="${dailyHex}">Vyzvat</button>` : ''}</div>
     <div><small>Jízd celkem</small><b>${st.runs}</b></div>
     <div><small>Branek / hvězd</small><b>${st.gates} / ${st.stars}</b></div>
   </div>`);
   const days = Object.keys(T.daily).sort().reverse().slice(0, 7);
-  if (days.length) rows.push(`<h3>Denní výzvy</h3><ul class="rec-list">${days.map(d => `<li><span>${d.split('-').reverse().map(Number).join('. ')}</span><b>${T.daily[d]}</b></li>`).join('')}</ul>`);
+  if (days.length) rows.push(`<h3>Denní výzvy</h3><ul class="rec-list">${days.map(d => `<li><span>${d.split('-').reverse().map(Number).join('. ')}</span><b>${fv(T.daily[d])}</b></li>`).join('')}</ul>`);
   const rivers = Object.keys(T.rivers).slice(0, 12);
-  if (rivers.length) rows.push(`<h3>Vlastní řeky</h3><ul class="rec-list">${rivers.map(n => `<li><span>${escapeHtml(n)}</span><b>${T.rivers[n]}</b>${T.seeds[seedHex(riverSeed(n))] ? `<button class="mini" data-action="share-seed" data-seed="${seedHex(riverSeed(n))}">Vyzvat</button>` : ''}</li>`).join('')}</ul>`);
-  if (REC.challenges.length) rows.push(`<h3>Výzvy od kamarádů</h3><ul class="rec-list">${REC.challenges.slice(0, 15).map(h => `<li class="${h.mine > h.their ? 'win' : h.mine === h.their ? 'draw' : 'lose'}"><span>${escapeHtml(h.from)} <small>${escapeHtml(h.label || '')} · ${levelName(h.level ?? 1)}${h.ctrl === CTRL.ride ? ' · volná jízda' : ''}${h.verified ? '' : ' · neověřeno'}</small></span><b>${h.mine} : ${h.their}</b><button class="mini" data-action="replay-challenge" data-code="${h.code}">Hrát</button></li>`).join('')}</ul>`);
+  if (rivers.length) rows.push(`<h3>Vlastní řeky</h3><ul class="rec-list">${rivers.map(n => `<li><span>${escapeHtml(n)}</span><b>${fv(T.rivers[n])}</b>${T.seeds[seedHex(riverSeed(n))] ? `<button class="mini" data-action="share-seed" data-seed="${seedHex(riverSeed(n))}">Vyzvat</button>` : ''}</li>`).join('')}</ul>`);
+  if (REC.challenges.length) rows.push(`<h3>Výzvy od kamarádů</h3><ul class="rec-list">${REC.challenges.slice(0, 15).map(h => `<li class="${h.mine > h.their ? 'win' : h.mine === h.their ? 'draw' : 'lose'}"><span>${escapeHtml(h.from)} <small>${escapeHtml(h.label || '')} · ${levelName(h.level ?? 1)}${h.ctrl === CTRL.slalom ? ' · slalom' : h.ctrl === CTRL.ride ? ' · volná jízda' : ''}${h.verified ? '' : ' · neověřeno'}</small></span><b>${h.ctrl === CTRL.slalom ? slTime(h.mine) + ' : ' + slTime(h.their) : h.mine + ' : ' + h.their}</b><button class="mini" data-action="replay-challenge" data-code="${h.code}">Hrát</button></li>`).join('')}</ul>`);
   if (!days.length && !rivers.length && !REC.challenges.length && !st.runs) rows.push('<p class="muted">Zatím žádné jízdy. Hurá na vodu!</p>');
   $('recBody').innerHTML = rows.join('');
 }
@@ -5816,7 +6370,8 @@ document.addEventListener('click', e => {
   const act = btn.dataset.action;
   if (act !== 'back') A.ui('click');
   switch (act) {
-    case 'play-free': prepareRun({ mode: 'free', seed: newRandomSeed(), label: 'Volná plavba' }); break;
+    case 'play-free': startFree(); break;
+    case 'set-ctrl': S.ctrl = +btn.dataset.ctrl === CTRL.ride ? CTRL.ride : CTRL.tap; saveSettings(); refreshMenu(); break;
     case 'open-mp': openMp(); break;
     case 'mp-register': mpRegister(); break;
     case 'mp-rename': mpView('reg'); $('mpName').value = (MP.me && MP.me.name) || ''; mpMsg('mpRegMsg', 'Nová přezdívka se zaregistruje zvlášť.'); break;
@@ -5826,12 +6381,21 @@ document.addEventListener('click', e => {
     case 'mp-leave': mpLeave(); MP.results = null; openMp(); break;
     case 'mp-invite': mpInvite(); break;
     case 'mp-kick': if (confirm('Odebrat hráče ze závodu?')) mpSend({ k: 'kick', id: btn.dataset.id }); break;
-    case 'play-ride': prepareRun({ mode: 'free', seed: newRandomSeed(), label: 'Volná jízda', ctrl: CTRL.ride }); break;
-    case 'rec-ctrl': recCtrl = +btn.dataset.ctrl === CTRL.ride ? CTRL.ride : CTRL.tap; renderRecords(); break;
-    case 'set-level': S.level = levelOf(+btn.dataset.level).id; saveSettings(); refreshMenu(); if (currentScreen === 'scrRecords') renderRecords(); break;
+    case 'mute': toggleMute(); break;
+    case 'reset-tips': S.tutorial = true; S.rideTut = 0; S.rideTut2 = 0; saveSettings(); toast('Tipy zapnuty'); break;
+    case 'open-slalom': refreshSlalom(); showScreen('scrSlalom'); break;
+    case 'play-slalom': {
+      const t = btn.dataset.track;
+      if (t === 'daily') { const dk = utcDayKey(); G.dayKey = dk; prepareRun({ mode: 'daily', seed: dailySeed(dk), label: modeLabel('daily', dk, CTRL.slalom), ctrl: CTRL.slalom }); }
+      else if (t === 'free') prepareRun({ mode: 'free', seed: newRandomSeed(), label: 'Nová trať', ctrl: CTRL.slalom });
+      else prepareRun({ mode: 'track', seed: trackSeed(t), label: 'Trať ' + t, ctrl: CTRL.slalom });
+      break;
+    }
+    case 'rec-ctrl': recCtrl = +btn.dataset.ctrl === CTRL.slalom ? CTRL.slalom : +btn.dataset.ctrl === CTRL.ride ? CTRL.ride : CTRL.tap; renderRecords(); break;
+    case 'set-level': S.level = levelOf(+btn.dataset.level).id; saveSettings(); refreshMenu(); if (currentScreen === 'scrRecords') renderRecords(); if (currentScreen === 'scrSlalom') refreshSlalom(); break;
     case 'play-daily': startDaily(); break;
     case 'open-challenge': openChallengeScreen('', currentScreen === 'scrMenu' ? null : currentScreen); break;
-    case 'open-records': renderRecords(); showScreen('scrRecords'); break;
+    case 'open-records': recCtrl = S.ctrl; renderRecords(); showScreen('scrRecords'); break;
     case 'open-settings': syncSettingsUI(); showScreen('scrSettings'); break;
     case 'open-help': showScreen('scrHelp'); break;
     case 'back': backFrom(currentScreen); break;
@@ -5857,7 +6421,7 @@ document.addEventListener('click', e => {
     case 'share-seed': { const rec = LR(S.level, recCtrl).seeds[btn.dataset.seed]; if (rec && rec.code) { try { const r = Replay.decode(rec.code); openShare(Object.assign(r, { code: rec.code })); } catch (err) { toast(err.message || 'Záznam je poškozený'); } } else toast('Na této řece zatím nemáš jízdu'); break; }
     case 'replay-challenge': openChallengeScreen(btn.dataset.code, 'scrRecords'); break;
     case 'reset-records':
-      if (confirm('Opravdu smazat všechny rekordy a historii výzev?')) { for (const k of Object.keys(REC)) delete REC[k]; Object.assign(REC, { L: [blankLevelRec(), blankLevelRec(), blankLevelRec()], R: [blankLevelRec(), blankLevelRec(), blankLevelRec()], rideRules: RIDE_RULES, challenges: [], stats: { runs: 0, gates: 0, stars: 0, strokes: 0, dist: 0, time: 0 } }); saveRecords(); renderRecords(); toast('Rekordy smazány'); }
+      if (confirm('Opravdu smazat všechny rekordy a historii výzev?')) { for (const k of Object.keys(REC)) delete REC[k]; Object.assign(REC, { L: [blankLevelRec(), blankLevelRec(), blankLevelRec()], R: [blankLevelRec(), blankLevelRec(), blankLevelRec()], S: [blankLevelRec(), blankLevelRec(), blankLevelRec()], slalomKey: RIDE_RULES + ':' + SLALOM_RULES, rideRules: RIDE_RULES, challenges: [], stats: { runs: 0, gates: 0, stars: 0, strokes: 0, dist: 0, time: 0 } }); saveRecords(); renderRecords(); toast('Rekordy smazány'); }
       break;
   }
 });
@@ -5882,6 +6446,7 @@ window.addEventListener('hashchange', () => {
 });
 
 function syncSettingsUI() {
+  syncMuteIcons();
   $('setSfx').value = S.sfx; $('setMusic').value = S.music; $('setAmb').value = S.amb;
   $('setGhosts').checked = S.ghosts; $('setShake').checked = S.shake; $('setHaptics').checked = S.haptics; $('setHitbox').checked = S.hitbox;
   $('setQuality').value = S.quality; $('setRes').value = RES_STEPS.includes(S.res) ? S.res : 'auto'; $('setName').value = S.name;
@@ -5986,7 +6551,9 @@ function frame(now) {
 function tickFrame(now) {
   const rawMs = now - lastNow;
   lastNow = now;
-  const dt = clamp(rawMs, 0, 18 * TICK_MS) / 1000;
+  // the crash plays in slow motion that eases back to normal speed (only the visuals: the sim has already ended)
+  const slow = (G.state === 'dead' && G.death && S.shake && !reducedMotion) ? 0.3 + 0.7 * clamp((performance.now() - G.deadAt) / 700, 0, 1) : 1;
+  const dt = clamp(rawMs, 0, 18 * TICK_MS) / 1000 * slow;
   const t0 = performance.now();
   pollGamepads();
   tickResume(now);
@@ -5994,7 +6561,7 @@ function tickFrame(now) {
   if (!paused) VT += dt;
   if (G.state === 'menu') updateAttract(dt);
   else if (G.state === 'play') updatePlay(now);
-  if (G.mp) mpTick(now);
+  if (G.mp || G.mpStart) mpTick(now);
   const course = viewCourse();
   if (!paused) { updateParticles(dt, course); ambient(dt, course); }
   if (course) {
@@ -6002,10 +6569,10 @@ function tickFrame(now) {
     const night = BIOMES[b.a].night + (BIOMES[b.b].night - BIOMES[b.a].night) * b.t;
     const sim = G.state === 'menu' ? G.attract.sim : G.sim;
     let intensity = sim ? course.difficultyAt(sim.x) : 0;
-    if (sim && G.ctrl === CTRL.ride && G.state !== 'menu' && sim.tempo !== undefined) { G.tempoS = (G.tempoS || 0) + (sim.tempo - (G.tempoS || 0)) * Math.min(1, dt * 4); intensity = Math.max(intensity, 0.15 + 0.25 * G.tempoS + 0.2 * ((sim.mult || 1) - 1)); }
+    if (sim && G.ctrl >= CTRL.ride && G.state !== 'menu' && sim.tempo !== undefined) { G.tempoS = (G.tempoS || 0) + (sim.tempo - (G.tempoS || 0)) * Math.min(1, dt * 4); intensity = Math.max(intensity, 0.15 + 0.25 * G.tempoS + 0.2 * ((sim.mult || 1) - 1)); }
     A.setScene({ biome: b.t > 0.5 ? b.b : b.a, night, intensity, speed: sim ? clamp((sim.vx - 232) / 110, 0, 1) : 0 });
   }
-  render(now, paused ? 0 : dt);
+  if (!(G.state === 'menu' && qualityLevel < 2 && ((G.frameN = (G.frameN | 0) + 1) & 1))) render(now, paused ? 0 : dt);
   lastFrameMs = performance.now() - t0;
   if (rawMs > 0 && rawMs < 250) perfMonitor(rawMs, now);
   pumpChunkJobs(t0);
