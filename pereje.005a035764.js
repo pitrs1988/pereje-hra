@@ -1017,6 +1017,21 @@ const Replay = {
     return { mode, level, ctrl, seed, score, endTick, name, label, taps, pauses, rules };
   },
   // A genuine run dies exactly at endTick with exactly the claimed score.
+  // A race run that stopped ALIVE on the finish line: replaying must reach `goal` gates exactly at endTick, with
+  // exactly the claimed score (a crash in the same step is not a finish). Slalom ends at its own finish.
+  verifyFinish(r, goal) {
+    if (r.ctrl === CTRL.slalom) return this.verify(r);
+    const ride = r.ctrl === CTRL.ride;
+    const sim = ride ? new RideSim(new Course(r.seed, r.level, CTRL.ride)) : new Sim(new Course(r.seed, r.level));
+    let ii = 0, ti = 0, st = 0;
+    while (sim.alive && sim.tick < r.endTick && sim.gatesPassed < goal) {
+      let tap = false;
+      if (ride) { while (ii < r.inputs.length && r.inputs[ii][0] <= sim.tick) st = r.inputs[ii++][1] & RIDE_MASK; }
+      else while (ti < r.taps.length && r.taps[ti] <= sim.tick) { if (r.taps[ti] === sim.tick) tap = true; ti++; }
+      sim.step(ride ? st : tap); sim.events.length = 0;
+    }
+    return { ok: sim.alive && sim.gatesPassed >= goal && sim.tick === r.endTick && sim.score === r.score, score: sim.score, endTick: sim.tick, sim };
+  },
   verify(r) {
     if (r.ctrl === CTRL.slalom) {   // the time and every penalty must be reproduced exactly
       const sm = runSlalom(r.seed, r.inputs, r.level, r.endTick);
@@ -4598,7 +4613,10 @@ function render(now, dt) {
     }
     c.globalAlpha = 1;
   }
-  if (course.finite && course.finishX < revealX + 40 && course.finishX > V.camX - 80) drawFinishLine(c, course);
+  { // finish line: the slalom's end of course, or the race's goal gate
+    const fx = course.finite ? course.finishX : (G.mp && G.goal > 0 && G.ctrl < CTRL.slalom && course.gates[G.goal - 1]) ? course.gates[G.goal - 1].passX + 24 : 0;
+    if (fx && fx < revealX + 40 && fx > V.camX - 80) drawFinishLine(c, fx);
+  }
   prewarmSprites(course, revealX);
   const taken = sim ? sim.taken : [];
   const visStars = [];
@@ -4915,8 +4933,8 @@ function drawSlalomGate(c, g, idx, sim) {
   c.fillStyle = cur ? '#0b2530' : '#e6f8ff'; c.font = '700 11px system-ui, sans-serif'; c.textAlign = 'center'; c.textBaseline = 'middle'; c.fillText(label, g.x, top - 22.5);
   c.restore();
 }
-function drawFinishLine(c, course) {
-  const fx = course.finishX, y0 = -10, y1 = RIVER_H + 10, sq = 16;
+function drawFinishLine(c, fx) {
+  const y0 = -10, y1 = RIVER_H + 10, sq = 16;
   c.save();
   for (let y = y0, i = 0; y < y1; y += sq, i++) for (let k = 0; k < 2; k++) { c.fillStyle = (i + k) % 2 ? '#10202a' : '#fff'; c.fillRect(fx - sq + k * sq, y, sq, sq); }
   c.fillStyle = 'rgba(255,255,255,0.9)'; c.font = '800 22px system-ui, sans-serif'; c.textAlign = 'center'; c.fillText('CÍL', fx, RIVER_H / 2 - 40);
@@ -5242,6 +5260,7 @@ function prepareRun(opt) {
   // opt: { mode, seed, label, challenge, level }
   G.mode = opt.mode; G.seed = opt.seed >>> 0; G.label = opt.label; G.challenge = opt.challenge || null;
   G.mp = opt.mode === 'mp';
+  G.goal = opt.mode === 'mp' ? opt.goal | 0 : 0; G.goalDone = false; G.mpWin = false; G.goalShown = '';
   G.level = levelOf(G.challenge ? G.challenge.level : opt.level ?? S.level).id;
   const cc = G.challenge ? G.challenge.ctrl : opt.ctrl;
   G.ctrl = cc === CTRL.slalom ? CTRL.slalom : cc === CTRL.ride ? CTRL.ride : CTRL.tap;
@@ -5279,6 +5298,7 @@ function prepareRun(opt) {
   if (G.mp) $('tapHint').classList.add('hidden');
   document.body.classList.toggle('ride', G.ctrl === CTRL.ride);
   document.body.classList.toggle('slalom', G.ctrl === CTRL.slalom);
+  document.body.classList.toggle('goalrace', G.mp && G.ctrl < CTRL.slalom);
   if (G.ctrl === CTRL.slalom) {   // a finite time trial: everybody starts on a countdown so the clock begins at tick 0
     $('tapHint').classList.add('hidden');
     $('hudScore').textContent = '0:00,00'; slalomHud(G.sim, true);
@@ -5296,9 +5316,9 @@ function prepareRun(opt) {
 const LIVE_DELAY = 24;
 const MP_COLORS = ['#ffd6a0', '#c8f7a8', '#ffc4e6', '#b9e4ff', '#f3e7a6', '#d7c8ff', '#a8f0e0', '#ffcfb0'];
 function makeLiveGhost(p, i) {
-  const ride = G.ctrl === CTRL.ride;
+  const ride = G.ctrl >= CTRL.ride;
   return { live: true, id: p.id, name: p.name, ride, taps: [], inputs: [], ti: 0, ii: 0, st: 0, ack: -1, col: MP_COLORS[i % MP_COLORS.length],
-    sim: ride ? new RideSim(G.course) : new Sim(G.course), style: 'ghost', pad: null, finalScore: 0, done: null, left: false };
+    sim: G.ctrl === CTRL.slalom ? new SlalomSim(G.course) : ride ? new RideSim(G.course) : new Sim(G.course), style: 'ghost', pad: null, finalScore: 0, done: null, left: false };
 }
 function stepLive(gh) {
   if (!gh.sim.alive) return;
@@ -5394,6 +5414,16 @@ function updatePlay(now) {
     sim.step(ride ? G.rideSt : tap);
     for (const ev of sim.events) handleEvent(ev, sim, false);
     sim.events.length = 0;
+    // the finish line stops the run on exactly the tick that completed the last gate (the replay is checked to that tick)
+    if (G.mp && G.goal > 0 && G.ctrl < CTRL.slalom && sim.alive && sim.gatesPassed >= G.goal) break;
+  }
+  if (G.mp && G.ctrl < CTRL.slalom) {
+    // what decides this race: "Cíl 7/20" (finish line, best time wins) or "Poslední vítězí · na vodě 3"
+    let txt;
+    if (G.goal > 0) txt = 'Cíl ' + Math.min(sim.gatesPassed, G.goal) + '/' + G.goal;
+    else { let n = 1; for (const gh of G.ghosts) if (gh.live && !gh.done && !gh.left && gh.sim.alive) n++; txt = 'Poslední vítězí · na vodě ' + n; }
+    if (txt !== G.goalShown) { G.goalShown = txt; $('hudSlGate').textContent = txt; }
+    if (G.goal > 0 && sim.alive && sim.gatesPassed >= G.goal && G.state === 'play') onGoalReached(sim);
   }
   if (G.ctrl === CTRL.slalom) {
     const tot = sim.tick + sim.pen;
@@ -5471,7 +5501,8 @@ function updateRaceHud() {
     const mine = G.sim.score;
     if (gh.live) {
       const sc = gh.done ? gh.done.score : gh.sim.score, cls = mine > sc ? 'ahead' : mine === sc ? 'even' : 'behind';
-      html += `<div class="race ghost ${cls}"><span class="dot"></span><b>${escapeHtml(gh.name)}</b><span>${gh.left ? 'odpojen' : gh.done || !gh.sim.alive ? 'konec · ' + (sc | 0) : sc | 0}</span></div>`;
+      const txt = G.ctrl === CTRL.slalom ? (gh.sim.finished ? slTime(gh.sim.score) : 'branka ' + gh.sim.cross) : gh.left ? 'odpojen' : gh.done ? (gh.done.fin ? 'v cíli · ' : 'konec · ') + (sc | 0) : !gh.sim.alive ? 'konec · ' + (sc | 0) : sc | 0;
+      html += `<div class="race ghost ${cls}"><span class="dot"></span><b>${escapeHtml(gh.name)}</b><span>${txt}</span></div>`;
       continue;
     }
     const target = gh.finalScore;
@@ -5503,6 +5534,24 @@ function slalomHud(sim, force) {
   $('hudSlGate').textContent = 'Branka ' + Math.min(n, sim.cross + (sim.cross < n ? 1 : 0)) + '/' + n;
   if (!sim.pen) $('hudSlPen').textContent = '';
   if (G.slDeltaUntil && performance.now() > G.slDeltaUntil) { G.slDeltaUntil = 0; $('hudSlDelta').textContent = ''; }
+}
+function onGoalReached(sim) {
+  G.state = 'dead'; G.goalDone = true; sim.deathTick = sim.tick;   // stopped alive on the line
+  G.deadAt = performance.now();
+  A.record(); A.setMusicState('over'); Native.haptic('record');
+  showBanner('V cíli!', secs(sim.tick / TICK_RATE), 1500, 2);
+  finishRun();
+  setTimeout(() => { if (G.state === 'dead') showOver(); }, 1500);
+}
+// the race is decided while this boat is still on the water (last one standing, or the room timed out)
+function mpEarlyEnd(m) {
+  const me = m.list.find(x => x.id === MP.id), sim = G.sim;
+  G.state = 'dead'; G.deadAt = performance.now(); sim.deathTick = sim.tick;
+  G.mpWin = !!(me && me.win);
+  if (G.mpWin) { A.record(); Native.haptic('record'); showBanner('Vyhrál jsi!', 'Všichni ostatní už jsou venku', 1600, 2); }
+  A.setMusicState('over');
+  G.lastRun = { mode: G.mode, level: G.level, ctrl: G.ctrl, seed: G.seed, score: sim.score, endTick: sim.tick, name: playerName(), label: G.label, taps: G.taps.slice(), inputs: G.inputs.filter(i => i[0] < sim.tick), pauses: 0 };
+  setTimeout(() => { if (G.state === 'dead') showOver(); }, 1500);
 }
 function onSlalomFinish(sim) {
   G.state = 'dead';
@@ -5543,7 +5592,7 @@ function finishRun() {
     const st = REC.stats; st.runs++; st.gates += sim.gatesPassed; st.stars += sim.starsGot; st.strokes += sim.strokes; st.dist += Math.round(sim.x / 10); st.time += sim.deathTick / TICK_RATE;
     st.mpRaces = (st.mpRaces || 0) + 1;
     saveRecords();
-    if (MP.ws && MP.ws.readyState === 1) { mpFlush(performance.now(), sim.deathTick, true); mpSend({ k: 'done', t: sim.deathTick, score: sim.score, code }); }
+    if (MP.ws && MP.ws.readyState === 1) { mpFlush(performance.now(), sim.deathTick, true); mpSend({ k: 'done', t: sim.deathTick, score: sim.score, code, fin: !!G.goalDone }); }
     else MP.lost = true;
     return;
   }
@@ -5578,7 +5627,7 @@ function showOver() {
   G.overAt = performance.now();
   setHud(false);
   const sim = G.sim, slalom = G.ctrl === CTRL.slalom;
-  $('ovTitle').textContent = G.newBest ? (slalom ? 'Nový rekord trati!' : 'Nový rekord!') : slalom ? 'V cíli!' : pickCrashTitle(sim.death && sim.death.cause);
+  $('ovTitle').textContent = G.mpWin ? 'Vyhrál jsi!' : G.newBest ? (slalom ? 'Nový rekord trati!' : 'Nový rekord!') : (slalom || G.goalDone) ? 'V cíli!' : pickCrashTitle(sim.death && sim.death.cause);
   $('ovTitle').classList.toggle('gold', G.newBest);
   if (slalom) $('ovScore').textContent = slTime(sim.score) + ' ' + slMedal(G.level, SL_CAP - sim.score);
   else countUp($('ovScore'), sim.score, clamp(250 + sim.score * 10, 300, 900));
@@ -5800,7 +5849,7 @@ function mpJoin(code) {
   MP.id = '';
   ws.onopen = () => {
     MP.hb = setInterval(() => mpSend({ k: 'hb' }), 5000);
-    mpSend({ k: 'hello', proto: 1, name: MP.me.name, token: MP.me.token, rr: RIDE_RULES });
+    mpSend({ k: 'hello', proto: 2, name: MP.me.name, token: MP.me.token, rr: RIDE_RULES * 1000 + SLALOM_RULES });
     for (let i = 0; i < 4; i++) setTimeout(() => mpSend({ k: 'ping', c: Date.now() }), i * 180);
   };
   ws.onmessage = e => { let m; try { m = JSON.parse(e.data); } catch { return; } if (ws === MP.ws) mpOnMsg(m); };
@@ -5849,7 +5898,7 @@ function mpOnMsg(m) {
     case 'ack': { const gh = raceGhost(m.id); if (gh && m.t > gh.ack) gh.ack = m.t; break; }
     case 'done': { const gh = raceGhost(m.id); if (gh) { gh.done = { score: m.score, t: m.t, code: m.code }; gh.ack = Math.max(gh.ack, m.t + 1); } if (G.state === 'over') renderStandings(); break; }
     case 'left': { const gh = raceGhost(m.id); if (gh && !gh.done) gh.left = true; if (G.state === 'over') renderStandings(); break; }
-    case 'results': MP.results = m; mpVerifyResults(m); if (G.state === 'over' || G.state === 'dead') renderStandings(); break;
+    case 'results': MP.results = m; mpVerifyResults(m); if (G.mp && G.state === 'play') mpEarlyEnd(m); if (G.state === 'over' || G.state === 'dead') renderStandings(); break;
   }
 }
 const raceGhost = id => MP.raceGhosts.find(x => x.live && x.id === id);
@@ -5857,8 +5906,9 @@ function renderLobby() {
   const st = MP.st; if (!st) return;
   const host = st.host === MP.id;
   $('mpPlayers').innerHTML = st.players.map(p => `<li class="${p.ready ? 'ready' : ''}${p.id === MP.id ? ' me' : ''}"><span class="mark">${p.ready ? '✓' : '·'}</span><b>${escapeHtml(p.name)}</b>${p.id === st.host ? '<em>zakladatel</em>' : ''}${p.id === MP.id ? '<em>ty</em>' : ''}${host && p.id !== MP.id && st.phase === 'lobby' ? `<button class="mini kick" data-action="mp-kick" data-id="${escapeHtml(p.id)}" aria-label="Odebrat ${escapeHtml(p.name)}">×</button>` : ''}<small>${p.st === 'race' ? 'závodí' : p.st === 'wait' ? 'čeká na kolo' : p.ready ? 'připraven' : 'nepřipraven'}</small></li>`).join('');
-  $('mpCtrl').value = String(st.ctrl); $('mpLevel').value = String(st.level);
-  $('mpCtrl').disabled = $('mpLevel').disabled = !host || st.phase !== 'lobby';
+  $('mpCtrl').value = String(st.ctrl); $('mpLevel').value = String(st.level); $('mpGoal').value = String(st.goal === undefined ? 20 : st.goal);
+  $('mpCtrl').disabled = $('mpLevel').disabled = $('mpGoal').disabled = !host || st.phase !== 'lobby';
+  $('mpGoal').closest('label').hidden = st.ctrl === 2;
   const me = st.players.find(p => p.id === MP.id), ready = !!(me && me.ready);
   $('mpReady').classList.toggle('on', ready);
   $('mpReady').querySelector('span').textContent = ready ? 'Připraven ✓ (zrušit)' : 'Jsem připraven';
@@ -5874,11 +5924,23 @@ function renderLobbyResults() {
   const box = $('mpLast');
   if (!MP.results) { box.hidden = true; return; }
   box.hidden = false;
-  const list = MP.results.list.slice().sort((a, b) => rankKey(b) - rankKey(a));
-  box.innerHTML = '<b>Poslední závod</b><ol>' + list.map(x => `<li class="${MP.verified.get(x.code) === false ? 'fake' : ''}"><span>${escapeHtml(x.name)}</span><b>${x.left ? 'odpojen' : x.score | 0}</b>${x.left ? '' : verifiedMark(x)}</li>`).join('') + '</ol>';
+  const list = MP.results.list.slice().sort(raceCmp);
+  box.innerHTML = '<b>Poslední závod</b><ol>' + list.map(x => `<li class="${MP.verified.get(x.code) === false ? 'fake' : ''}"><span>${escapeHtml(x.name)}</span><b>${raceVal(x)}</b>${x.left ? '' : verifiedMark(x)}</li>`).join('') + '</ol>';
 }
 // ranking: a score that failed verification counts as nothing; unverified-yet keeps its claimed value
 const rankKey = x => x.left ? -2 : MP.verified.get(x.code) === false ? -1 : (x.score | 0);
+// the final order: slalom = best time; finish line = finishers by time, then score; last one standing = the survivor,
+// then whoever crashed later. Records that fail verification sit above the disconnected, below everyone honest.
+const raceCmp = (a, b) => {
+  const R = MP.results || {}, goal = R.goal | 0, ctrl = R.ctrl | 0;
+  const tier = x => x.left ? 0 : MP.verified.get(x.code) === false ? 1 : ctrl === 2 ? 2 : goal > 0 ? (x.fin ? 4 : 3) : (x.win ? 4 : 3);
+  const ta = tier(a), tb = tier(b);
+  if (ta !== tb) return tb - ta;
+  if (ctrl === 2) return b.score - a.score;
+  if (goal > 0) return a.fin ? (a.t - b.t || b.score - a.score) : (b.score - a.score || b.t - a.t);
+  return b.t - a.t || b.score - a.score;
+};
+const raceVal = x => { const R = MP.results || {}; return x.left ? 'odpojen' : (R.ctrl | 0) === 2 ? slTime(x.score | 0) : x.win ? 'vítěz · ' + (x.score | 0) : x.fin ? secs(x.t / TICK_RATE) + ' · ' + (x.score | 0) : x.score | 0; };
 const verifiedMark = x => { const v = MP.verified.get(x.code); return v === undefined ? '' : v ? '<i class="ok" title="ověřeno přehráním">✓</i>' : '<i class="bad" title="záznam nesedí">✗</i>'; };
 const normInputs = list => { const out = []; let ps = 0; for (const [t, s] of list) if (s !== ps) { out.push(t + ':' + s); ps = s; } return out.join(','); };
 function mpVerifyResults(m) {
@@ -5890,7 +5952,8 @@ function mpVerifyResults(m) {
       let ok = false;
       try {
         const r = Replay.decode(x.code);
-        ok = r.seed === m.seed && r.level === m.level && (r.ctrl | 0) === m.ctrl && r.score === x.score && Replay.verify(r).ok;
+        const vr = x.fin ? Replay.verifyFinish(r, m.goal | 0) : Replay.verify(r);
+        ok = r.seed === m.seed && r.level === m.level && (r.ctrl | 0) === m.ctrl && r.score === x.score && r.endTick === x.t && vr.ok;
         const sig = (r.ctrl | 0) >= CTRL.ride ? normInputs(r.inputs) : r.taps.join(',');
         const gh = x.id !== MP.id ? raceGhost(x.id) : null;
         const complete = gh && gh.done && !gh.left && !gh.lost;   // a 'done' after all of their inputs on one socket
@@ -5917,7 +5980,7 @@ function mpStart(m) {
   MP.round = m.round; MP.results = null; MP.lost = false; MP.outQ = []; MP.ackAt = 0;
   const racers = m.players.filter(p => p.id !== MP.id);
   if (!m.players.some(p => p.id === MP.id)) return;   // joined mid-race: wait for the next one
-  prepareRun({ mode: 'mp', seed: m.seed, label: 'Závod', level: m.level, ctrl: m.ctrl, racers });
+  prepareRun({ mode: 'mp', seed: m.seed, label: 'Závod', level: m.level, ctrl: m.ctrl, racers, goal: m.goal | 0 });
   MP.raceGhosts = G.ghosts;   // the round's streams keep filling even after we go back to the room
   G.mpStart = performance.now() + (m.startAt - mpNow());
   G.mpCount = 0;
@@ -5929,9 +5992,9 @@ function mpFlush(now, tick, force) {
   MP.ackAt = now;
   if (MP.outQ.length) {
     const l = MP.outQ.splice(0, 64);
-    mpSend({ k: 'in', l, a: MP.outQ.length ? MP.outQ[0][0] : tick });
+    mpSend({ k: 'in', l, a: MP.outQ.length ? MP.outQ[0][0] : tick, sc: G.sim.score });
     if (MP.outQ.length) mpFlush(now, tick, true);
-  } else mpSend({ k: 'ack', t: tick });
+  } else mpSend({ k: 'ack', t: tick, sc: G.sim.score });
 }
 function mpTick(now) {
   if (G.state === 'ready' && G.mpStart) {
@@ -5956,14 +6019,14 @@ function renderStandings() {
   const res = $('ovChallenge');
   const final = MP.results && MP.results.round === MP.round;
   let rows;
-  if (final) rows = MP.results.list.map(x => ({ name: x.name, score: x.score | 0, me: x.id === MP.id, done: true, left: x.left, code: x.code }));
+  if (final) rows = MP.results.list.map(x => ({ name: x.name, score: x.score | 0, t: x.t, fin: x.fin, win: x.win, me: x.id === MP.id, done: true, left: x.left, code: x.code }));
   else {
     rows = [{ name: (MP.me && MP.me.name) || playerName(), score: G.sim.score, me: true, done: true, code: G.lastRun && G.lastRun.code }];
     for (const gh of MP.raceGhosts) if (gh.live) rows.push({ name: gh.name, score: (gh.done ? gh.done.score : gh.sim.score) | 0, done: !!gh.done || !gh.sim.alive, left: gh.left, lost: gh.lost, code: gh.done && gh.done.code });
   }
-  rows.sort((a, b) => rankKey(b) - rankKey(a));
+  rows.sort(final ? raceCmp : (a, b) => rankKey(b) - rankKey(a));
   const waiting = rows.filter(r => !r.done && !r.left && !r.lost).length;
-  res.innerHTML = `<b>${final ? 'Výsledky závodu' : 'Pořadí'}</b><ol class="mp-standings">` + rows.map((r, i) => `<li class="${r.me ? 'me' : ''}${MP.verified.get(r.code) === false ? ' fake' : ''}"><span>${i + 1}. ${escapeHtml(r.name)}</span><b>${r.left ? 'odpojen' : r.score | 0}</b>${r.left ? '' : r.done ? (r.code ? verifiedMark(r) : '') : r.lost ? '<small>?</small>' : '<small>jede</small>'}</li>`).join('') + '</ol>'
+  res.innerHTML = `<b>${final ? 'Výsledky závodu' : 'Pořadí'}</b><ol class="mp-standings">` + rows.map((r, i) => `<li class="${r.me ? 'me' : ''}${MP.verified.get(r.code) === false ? ' fake' : ''}"><span>${i + 1}. ${escapeHtml(r.name)}</span><b>${final ? raceVal(r) : r.left ? 'odpojen' : (G.ctrl === CTRL.slalom ? (r.done ? slTime(r.score | 0) : '…') : r.score | 0)}</b>${r.left ? '' : r.done ? (r.code ? verifiedMark(r) : '') : r.lost ? '<small>?</small>' : '<small>jede</small>'}</li>`).join('') + '</ol>'
     + (final ? '' : MP.lost ? '<span>Spojení se přerušilo — výsledky ostatních už nedorazí.</span>' : `<span>${waiting ? 'Čekáme, až dojedou ostatní (' + waiting + ')…' : 'Sčítáme…'}</span>`);
 }
 function mpBackToRoom() {
@@ -6479,8 +6542,8 @@ function setWater3d(on) {
   layout(true);
 }
 $('setWater').addEventListener('change', e => { S.water3d = e.target.checked; saveSettings(); A.ui('toggle'); setWater3d(S.water3d); });
-$('mpCtrl').addEventListener('change', e => mpSend({ k: 'set', ctrl: +e.target.value, level: +$('mpLevel').value }));
-$('mpLevel').addEventListener('change', e => mpSend({ k: 'set', ctrl: +$('mpCtrl').value, level: +e.target.value }));
+const mpSettings = () => mpSend({ k: 'set', ctrl: +$('mpCtrl').value, level: +$('mpLevel').value, goal: +$('mpGoal').value });
+$('mpCtrl').addEventListener('change', mpSettings); $('mpLevel').addEventListener('change', mpSettings); $('mpGoal').addEventListener('change', mpSettings);
 $('mpName').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); mpRegister(); } });
 $('mpCode').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); mpJoin(e.target.value); } });
 $('setCoast').addEventListener('change', e => { S.coast = e.target.value; saveSettings(); });

@@ -450,3 +450,4 @@ html, body { touch-action: manipulation; }
   .menu-wrap .card .name { margin-top: 0; }
   .menu-wrap .card .name input { padding: 6px 10px; }
 }
+body.goalrace.playing #hudSl { display: flex; }
